@@ -1,0 +1,789 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// Users table for authentication and role management
+model User {
+  id           Int      @id @default(autoincrement())
+  email        String   @unique
+  passwordHash String
+  fullName     String
+  role         String // 'admin', 'manager', or 'cashier'
+  isActive     Boolean  @default(true)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  // Relations
+  orders                    Order[]
+  stockMovements            StockMovement[]
+  cashierShifts             CashierShift[]
+  registrySessionsOpened    RegistrySession[]    @relation("RegistrySessionOpenedBy")
+  registrySessionsClosed    RegistrySession[]    @relation("RegistrySessionClosedBy")
+  refunds                   Refund[]
+  purchasePayments          PurchasePayment[]
+  purchaseReceives          PurchaseReceive[]
+  purchases                 Purchase[]
+  expenses                  Expense[]
+  auditLogs                 AuditLog[]
+  cashierPermissions        CashierPermission?
+  managerPermissions        ManagerPermission?
+  cashierPin                CashierPin?
+  cashierPinAssignedBy      CashierPin[]         @relation("CashierPinAssignedBy")
+  branchManager             Branch?              @relation("BranchManager")
+  holdOrders                HoldOrder[]
+  customerCredits           CustomerCredit[]
+  priceChangeHistory        PriceChangeHistory[]
+  refundApprovedBy          Refund[]             @relation("RefundApprovedBy")
+  cashTransactionApprovedBy CashTransaction[]    @relation("CashTransactionApprovedBy")
+  userSessions              UserSession[]
+  cashTransactions          CashTransaction[]
+
+  @@map("users")
+}
+
+// Products table for inventory management
+model Product {
+  id                Int      @id @default(autoincrement())
+  name              String
+  description       String?
+  defaultPricePerKg Decimal?
+  category          String?
+  isActive          Boolean  @default(true)
+  sku               String?  @unique
+  barcode           String?  @unique
+  imageUrl          String?
+  stockQuantity     Decimal  @default(0)
+  reorderLevel      Decimal  @default(10)
+  unitType          String   @default("weight") // 'weight' or 'unit'
+  costPrice         Decimal?
+  alertsEnabled     Boolean  @default(true)
+  alertEmail        String?
+  minStockLevel     Decimal?
+  maxStockLevel     Decimal?
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  // Relations
+  orderItems         OrderItem[]
+  stockMovements     StockMovement[]
+  purchaseItems      PurchaseItem[]
+  priceChangeHistory PriceChangeHistory[]
+  refundItems        RefundItem[]
+
+  @@map("products")
+}
+
+// Customers table
+model Customer {
+  id             Int      @id @default(autoincrement())
+  name           String
+  phone          String?  @unique
+  email          String?  @unique
+  address        String?
+  totalPurchases Decimal  @default(0)
+  visitCount     Int      @default(0)
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  // Relations
+  orders          Order[]
+  refunds         Refund[]
+  customerCredits CustomerCredit[]
+  holdOrders      HoldOrder[]
+
+  @@map("customers")
+}
+
+// Categories table
+model Category {
+  id          Int      @id @default(autoincrement())
+  name        String   @unique
+  description String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@map("categories")
+}
+
+// Orders table for transaction records
+model Order {
+  id                Int      @id @default(autoincrement())
+  orderNumber       String   @unique
+  cashierId         Int
+  customerId        Int?
+  registrySessionId Int?     // TEAM_003: Link orders to registry session for accurate reporting
+  subtotal          Decimal
+  discountAmount    Decimal  @default(0)
+  discountPercent   Decimal  @default(0)
+  taxAmount         Decimal  @default(0)
+  total             Decimal
+  paymentMethod     String   @default("cash") // 'cash', 'card', 'split'
+  cashReceived      Decimal?
+  changeGiven       Decimal?
+  notes             String?
+  status            String // 'completed' or 'voided'
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  // Relations
+  cashier         User             @relation(fields: [cashierId], references: [id])
+  customer        Customer?        @relation(fields: [customerId], references: [id])
+  registrySession RegistrySession? @relation(fields: [registrySessionId], references: [id])
+  orderItems      OrderItem[]
+  paymentDetails  PaymentDetail[]
+  refunds         Refund[]
+  stockMovements  StockMovement[]
+  customerCredits CustomerCredit[]
+
+  @@map("orders")
+}
+
+// Order items table for line items in each order
+model OrderItem {
+  id                  Int      @id @default(autoincrement())
+  orderId             Int
+  productId           Int?
+  itemName            String
+  quantityType        String // 'kg', 'g', or 'box'
+  itemWeightKg        Decimal  @default(0)
+  itemWeightG         Decimal  @default(0)
+  itemWeightTotalKg   Decimal
+  boxWeightKg         Decimal?
+  boxWeightG          Decimal?
+  boxWeightPerBoxKg   Decimal?
+  boxCount            Int?
+  totalBoxWeightKg    Decimal?
+  netWeightKg         Decimal
+  pricePerKg          Decimal
+  baseTotal           Decimal
+  itemDiscountPercent Decimal  @default(0)
+  itemDiscountAmount  Decimal  @default(0)
+  finalTotal          Decimal
+  costPrice           Decimal?
+  createdAt           DateTime @default(now())
+
+  // Relations
+  order       Order        @relation(fields: [orderId], references: [id])
+  product     Product?     @relation(fields: [productId], references: [id])
+  refundItems RefundItem[]
+
+  @@map("order_items")
+}
+
+// Stock movements table for inventory tracking
+model StockMovement {
+  id             Int      @id @default(autoincrement())
+  productId      Int
+  movementType   String // 'sale', 'restock', 'adjustment', 'return'
+  quantityChange Decimal
+  quantityAfter  Decimal
+  orderId        Int?
+  userId         Int
+  notes          String?
+  createdAt      DateTime @default(now())
+
+  // Relations
+  product Product @relation(fields: [productId], references: [id])
+  order   Order?  @relation(fields: [orderId], references: [id])
+  user    User    @relation(fields: [userId], references: [id])
+
+  @@map("stock_movements")
+}
+
+// Business settings table for receipt customization
+model BusinessSetting {
+  id            Int      @id @default(autoincrement())
+  businessName  String
+  address       String?
+  phone         String?
+  email         String?
+  taxRate       Decimal  @default(0)
+  logoUrl       String?
+  receiptFooter String?
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  @@map("business_settings")
+}
+
+// Payment details table for tracking individual payment methods (supports split payments)
+model PaymentDetail {
+  id          Int      @id @default(autoincrement())
+  orderId     Int
+  paymentType String // 'cash', 'card', 'mobile'
+  amount      Decimal
+  cardType    String? // 'visa', 'mastercard', 'amex', 'other'
+  reference   String?
+  createdAt   DateTime @default(now())
+
+  // Relations
+  order Order @relation(fields: [orderId], references: [id])
+
+  @@map("payment_details")
+}
+
+// Cashier permissions table for role-based access control
+model CashierPermission {
+  id                     Int      @id @default(autoincrement())
+  cashierId              Int      @unique
+  canApplyDiscount       Boolean  @default(true)
+  maxDiscountPercent     Decimal  @default(100)
+  canVoidOrders          Boolean  @default(false)
+  canEditPrices          Boolean  @default(false)
+  canAccessReports       Boolean  @default(false)
+  requireManagerApproval Boolean  @default(false)
+  canUpdateStock         Boolean  @default(false)
+  canProcessRefunds      Boolean  @default(false)
+  canAutoApproveRefunds  Boolean  @default(false) // Refunds auto-approved without admin review
+  canViewCustomers       Boolean  @default(true)  // Allow viewing customer list
+  canCreateCustomers     Boolean  @default(true)  // Allow creating new customers
+  createdAt              DateTime @default(now())
+  updatedAt              DateTime @updatedAt
+
+  // Relations
+  cashier User @relation(fields: [cashierId], references: [id])
+
+  @@map("cashier_permissions")
+}
+
+// Manager permissions for admin panel access
+model ManagerPermission {
+  id                     Int      @id @default(autoincrement())
+  managerId              Int      @unique
+  // Dashboard and Reports
+  canViewDashboard       Boolean  @default(true)
+  canViewReports         Boolean  @default(true)
+  canExportReports       Boolean  @default(true)
+
+  // User Management (limited)
+  canViewUsers           Boolean  @default(false)
+  canCreateUsers         Boolean  @default(false)
+  canEditUsers           Boolean  @default(false)
+  canDeleteUsers         Boolean  @default(false)
+
+  // Product Management
+  canViewProducts        Boolean  @default(true)
+  canCreateProducts      Boolean  @default(true)
+  canEditProducts        Boolean  @default(true)
+  canDeleteProducts      Boolean  @default(false)
+  canUpdateStock         Boolean  @default(true)
+
+  // Order Management
+  canViewOrders          Boolean  @default(true)
+  canEditOrders          Boolean  @default(false)
+  canVoidOrders          Boolean  @default(false)
+
+  // Customer Management
+  canViewCustomers       Boolean  @default(true)
+  canCreateCustomers     Boolean  @default(true)
+  canEditCustomers       Boolean  @default(true)
+  canDeleteCustomers     Boolean  @default(false)
+
+  // Purchase Management
+  canViewPurchases       Boolean  @default(true)
+  canCreatePurchases     Boolean  @default(true)
+  canEditPurchases       Boolean  @default(false)
+  canApprovePurchases    Boolean  @default(false)
+
+  // Financial (limited)
+  canViewExpenses        Boolean  @default(true)
+  canCreateExpenses      Boolean  @default(false)
+  canEditExpenses        Boolean  @default(false)
+  canDeleteExpenses      Boolean  @default(false)
+  canViewFinancialSummary Boolean @default(true)
+
+  // Registry Management
+  canViewRegistrySessions    Boolean  @default(true)
+  canCloseRegistrySessions   Boolean  @default(false)
+  canManageCashTransactions Boolean  @default(true)
+
+  // Session Management
+  canViewShifts          Boolean  @default(true)
+  canViewUserSessions    Boolean  @default(true)
+
+  // Supplier Management
+  canViewSuppliers       Boolean  @default(true)
+  canCreateSuppliers     Boolean  @default(false)
+  canEditSuppliers       Boolean  @default(false)
+  canDeleteSuppliers     Boolean  @default(false)
+
+  // Category Management
+  canViewCategories      Boolean  @default(true)
+  canCreateCategories    Boolean  @default(false)
+  canEditCategories      Boolean  @default(false)
+  canDeleteCategories    Boolean  @default(false)
+
+  // System Audit
+  canViewAuditLogs       Boolean  @default(false)
+
+  // Settings (very limited)
+  canViewSettings        Boolean  @default(false)
+  canEditSettings        Boolean  @default(false)
+
+  createdAt              DateTime @default(now())
+  updatedAt              DateTime @updatedAt
+
+  // Relations
+  manager User @relation(fields: [managerId], references: [id])
+
+  @@map("manager_permissions")
+}
+
+// Printer settings table for receipt printing configuration
+model PrinterSetting {
+  id            Int      @id @default(autoincrement())
+  printerName   String   @default("Default Printer")
+  printerType   String   @default("thermal") // 'thermal', 'a4', 'disabled'
+  paperSize     String   @default("80mm") // '80mm' or '57mm'
+  autoPrint     Boolean  @default(true)
+  printCopies   Int      @default(1)
+  businessName  String?
+  address       String?
+  phone         String?
+  email         String?
+  logoUrl       String?
+  receiptHeader String?
+  receiptFooter String?
+  showLogo      Boolean  @default(true)
+  showBarcode   Boolean  @default(false)
+  ipAddress     String?
+  port          Int?
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  @@map("printer_settings")
+}
+
+// Branches table for multi-branch support
+model Branch {
+  id        Int      @id @default(autoincrement())
+  name      String   @unique
+  code      String   @unique
+  address   String?
+  phone     String?
+  email     String?
+  managerId Int?     @unique
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // Relations
+  manager          User?             @relation("BranchManager", fields: [managerId], references: [id])
+  purchases        Purchase[]
+  expenses         Expense[]
+  cashierShifts    CashierShift[]
+  registrySessions RegistrySession[]
+
+  @@map("branches")
+}
+
+// Suppliers table
+model Supplier {
+  id                 Int      @id @default(autoincrement())
+  name               String
+  contactPerson      String?
+  phone              String?
+  email              String?
+  address            String?
+  taxId              String?
+  paymentTerms       String?
+  totalPurchases     Decimal  @default(0)
+  outstandingBalance Decimal  @default(0)
+  isActive           Boolean  @default(true)
+  notes              String?
+  createdAt          DateTime @default(now())
+  updatedAt          DateTime @updatedAt
+
+  // Relations
+  purchases Purchase[]
+
+  @@map("suppliers")
+}
+
+// Purchases table
+model Purchase {
+  id             Int       @id @default(autoincrement())
+  purchaseNumber String    @unique
+  supplierId     Int
+  branchId       Int?
+  userId         Int?
+  status         String
+  subtotal       Decimal
+  taxAmount      Decimal   @default(0)
+  shippingCost   Decimal   @default(0)
+  total          Decimal
+  paidAmount     Decimal   @default(0)
+  paymentStatus  String?
+  expectedDate   DateTime?
+  receivedDate   DateTime?
+  notes          String?
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+
+  // Relations
+  supplier         Supplier          @relation(fields: [supplierId], references: [id])
+  branch           Branch?           @relation(fields: [branchId], references: [id])
+  user             User?             @relation(fields: [userId], references: [id])
+  purchaseItems    PurchaseItem[]
+  purchasePayments PurchasePayment[]
+  purchaseReceives PurchaseReceive[]
+
+  @@map("purchases")
+}
+
+// Purchase items table
+model PurchaseItem {
+  id               Int      @id @default(autoincrement())
+  purchaseId       Int
+  productId        Int?
+  productName      String
+  quantity         Decimal
+  unitPrice        Decimal
+  totalPrice       Decimal
+  receivedQuantity Decimal  @default(0)
+  createdAt        DateTime @default(now())
+
+  // Relations
+  purchase         Purchase          @relation(fields: [purchaseId], references: [id])
+  product          Product?          @relation(fields: [productId], references: [id])
+  purchaseReceives PurchaseReceive[]
+
+  @@map("purchase_items")
+}
+
+// Purchase payments table for tracking payment history
+model PurchasePayment {
+  id            Int      @id @default(autoincrement())
+  purchaseId    Int
+  amount        Decimal
+  paymentMethod String?
+  paymentDate   DateTime @default(now())
+  reference     String?
+  userId        Int?
+  notes         String?
+  createdAt     DateTime @default(now())
+
+  // Relations
+  purchase Purchase @relation(fields: [purchaseId], references: [id])
+  user     User?    @relation(fields: [userId], references: [id])
+
+  @@map("purchase_payments")
+}
+
+// Purchase receives table for tracking receiving history
+model PurchaseReceive {
+  id               Int      @id @default(autoincrement())
+  purchaseId       Int
+  purchaseItemId   Int
+  receivedQuantity Decimal
+  userId           Int
+  receivedDate     DateTime @default(now())
+  notes            String?
+  createdAt        DateTime @default(now())
+
+  // Relations
+  purchase     Purchase     @relation(fields: [purchaseId], references: [id])
+  purchaseItem PurchaseItem @relation(fields: [purchaseItemId], references: [id])
+  user         User         @relation(fields: [userId], references: [id])
+
+  @@map("purchase_receives")
+}
+
+// Expense categories table
+model ExpenseCategory {
+  id          Int      @id @default(autoincrement())
+  name        String   @unique
+  description String?
+  isActive    Boolean  @default(true)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  // Relations
+  expenses Expense[]
+
+  @@map("expense_categories")
+}
+
+// Expenses table
+model Expense {
+  id            Int      @id @default(autoincrement())
+  categoryId    Int
+  branchId      Int?
+  userId        Int
+  amount        Decimal
+  description   String
+  expenseType   String
+  paymentMethod String?
+  reference     String?
+  expenseDate   DateTime @default(now())
+  notes         String?
+  createdAt     DateTime @default(now())
+
+  // Relations
+  category ExpenseCategory @relation(fields: [categoryId], references: [id])
+  branch   Branch?         @relation(fields: [branchId], references: [id])
+  user     User            @relation(fields: [userId], references: [id])
+
+  @@map("expenses")
+}
+
+// Cashier shifts table
+model CashierShift {
+  id            Int       @id @default(autoincrement())
+  cashierId     Int
+  branchId      Int?
+  shiftNumber   String    @unique
+  status        String
+  openingCash   Decimal
+  closingCash   Decimal?
+  expectedCash  Decimal?
+  actualCash    Decimal?
+  variance      Decimal?
+  totalSales    Decimal   @default(0)
+  totalOrders   Int       @default(0)
+  totalRefunds  Decimal   @default(0)
+  cashPayments  Decimal   @default(0)
+  cardPayments  Decimal   @default(0)
+  otherPayments Decimal   @default(0)
+  openedAt      DateTime  @default(now())
+  closedAt      DateTime?
+  notes         String?
+  createdAt     DateTime  @default(now())
+
+  // Relations
+  cashier User    @relation(fields: [cashierId], references: [id])
+  branch  Branch? @relation(fields: [branchId], references: [id])
+
+  @@map("cashier_shifts")
+}
+
+// Refunds table
+model Refund {
+  id              Int      @id @default(autoincrement())
+  refundNumber    String   @unique
+  originalOrderId Int
+  cashierId       Int
+  customerId      Int?
+  refundType      String
+  reason          String
+  totalAmount     Decimal
+  refundMethod    String
+  status          String
+  approvedBy      Int?
+  notes           String?
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  // Relations
+  originalOrder  Order        @relation(fields: [originalOrderId], references: [id])
+  cashier        User         @relation(fields: [cashierId], references: [id])
+  customer       Customer?    @relation(fields: [customerId], references: [id])
+  approvedByUser User?        @relation("RefundApprovedBy", fields: [approvedBy], references: [id])
+  refundItems    RefundItem[]
+
+  @@map("refunds")
+}
+
+// Refund items table
+model RefundItem {
+  id               Int      @id @default(autoincrement())
+  refundId         Int
+  orderItemId      Int
+  productId        Int?
+  productName      String
+  quantityReturned Decimal
+  refundAmount     Decimal
+  restockQuantity  Decimal?
+  condition        String?
+  createdAt        DateTime @default(now())
+
+  // Relations
+  refund    Refund    @relation(fields: [refundId], references: [id])
+  orderItem OrderItem @relation(fields: [orderItemId], references: [id])
+  product   Product?  @relation(fields: [productId], references: [id])
+
+  @@map("refund_items")
+}
+
+// Audit logs table
+model AuditLog {
+  id         Int      @id @default(autoincrement())
+  userId     Int
+  action     String
+  entityType String
+  entityId   Int?
+  changes    String?
+  ipAddress  String?
+  userAgent  String?
+  notes      String?
+  createdAt  DateTime @default(now())
+
+  // Relations
+  user User @relation(fields: [userId], references: [id])
+
+  @@map("audit_logs")
+}
+
+// Customer credits table
+model CustomerCredit {
+  id              Int      @id @default(autoincrement())
+  customerId      Int
+  orderId         Int?
+  transactionType String
+  amount          Decimal
+  balance         Decimal
+  description     String?
+  userId          Int?
+  createdAt       DateTime @default(now())
+
+  // Relations
+  customer Customer @relation(fields: [customerId], references: [id])
+  order    Order?   @relation(fields: [orderId], references: [id])
+  user     User?    @relation(fields: [userId], references: [id])
+
+  @@map("customer_credits")
+}
+
+// Hold orders table
+model HoldOrder {
+  id         Int      @id @default(autoincrement())
+  holdNumber String   @unique
+  cashierId  Int
+  customerId Int?
+  items      String
+  discount   Decimal  @default(0)
+  notes      String?
+  status     String
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  // Relations
+  cashier  User      @relation(fields: [cashierId], references: [id])
+  customer Customer? @relation(fields: [customerId], references: [id])
+
+  @@map("hold_orders")
+}
+
+// Price change history table
+model PriceChangeHistory {
+  id         Int      @id @default(autoincrement())
+  productId  Int
+  userId     Int
+  changeType String // 'cost_price' or 'selling_price'
+  oldPrice   Decimal
+  newPrice   Decimal
+  notes      String?
+  createdAt  DateTime @default(now())
+
+  // Relations
+  product Product @relation(fields: [productId], references: [id])
+  user    User    @relation(fields: [userId], references: [id])
+
+  @@map("price_change_history")
+}
+
+// Cashier PINs table for PIN-based authentication
+model CashierPin {
+  id         Int      @id @default(autoincrement())
+  userId     Int      @unique
+  pin        String
+  isActive   Boolean  @default(true)
+  assignedBy Int
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  // Relations
+  user           User @relation(fields: [userId], references: [id])
+  assignedByUser User @relation("CashierPinAssignedBy", fields: [assignedBy], references: [id])
+
+  @@map("cashier_pins")
+}
+
+// User sessions table for tracking login/logout activities
+model UserSession {
+  id            Int      @id @default(autoincrement())
+  userId        Int
+  loginMethod   String   // 'password' or 'pin'
+  loginTime     DateTime @default(now())
+  logoutTime    DateTime?
+  sessionDuration Int?   // in minutes
+  ipAddress     String?
+  userAgent     String?
+  registryOpened Boolean @default(false) // whether this user opened a registry session
+  registrySessionId Int? // reference to registry session if they opened one
+  createdAt     DateTime @default(now())
+
+  // Relations
+  user             User            @relation(fields: [userId], references: [id])
+  registrySession  RegistrySession? @relation(fields: [registrySessionId], references: [id])
+
+  @@map("user_sessions")
+}
+
+// Registry sessions table for cash drawer tracking
+model RegistrySession {
+  id            Int       @id @default(autoincrement())
+  openedBy      Int
+  closedBy      Int?
+  branchId      Int?
+  sessionNumber String    @unique
+  sessionDate   DateTime  @default(now()) // YYYY-MM-DD for daily tracking
+  status        String // 'open' or 'closed'
+  openingCash   Decimal
+  closingCash   Decimal?
+  actualCash    Decimal?
+  variance      Decimal?
+  totalSales    Decimal   @default(0)
+  totalOrders   Int       @default(0)
+  cashPayments  Decimal   @default(0)
+  cardPayments  Decimal   @default(0)
+  otherPayments Decimal   @default(0)
+  cashIn        Decimal   @default(0) // Total cash received (non-sales)
+  cashOut       Decimal   @default(0) // Total cash given out
+  cashRefunds   Decimal   @default(0) // Total cash refunds given
+  cashierCount  Int       @default(0) // Number of cashiers who used this registry
+  openedAt      DateTime  @default(now())
+  closedAt      DateTime?
+  notes         String?
+  closingNotes  String?
+  createdAt     DateTime  @default(now())
+
+  // Relations
+  openedByUser     User              @relation("RegistrySessionOpenedBy", fields: [openedBy], references: [id])
+  closedByUser     User?             @relation("RegistrySessionClosedBy", fields: [closedBy], references: [id])
+  branch           Branch?           @relation(fields: [branchId], references: [id])
+  cashTransactions CashTransaction[]
+  userSessions     UserSession[]
+  orders           Order[]           // TEAM_003: Orders made during this session
+
+  @@map("registry_sessions")
+}
+
+// Cash transactions table for tracking cash in/out movements
+model CashTransaction {
+  id                Int      @id @default(autoincrement())
+  registrySessionId Int
+  cashierId         Int
+  transactionType   String // 'cash_in' or 'cash_out'
+  amount            Decimal
+  reason            String
+  reference         String?
+  notes             String?
+  approvedBy        Int?
+  createdAt         DateTime @default(now())
+
+  // Relations
+  registrySession RegistrySession @relation(fields: [registrySessionId], references: [id])
+  cashier         User            @relation(fields: [cashierId], references: [id])
+  approvedByUser  User?           @relation("CashTransactionApprovedBy", fields: [approvedBy], references: [id])
+
+  @@map("cash_transactions")
+}

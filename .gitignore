@@ -1,0 +1,48 @@
+# Dependencies
+node_modules
+.pnp
+.pnp.js
+
+# Production
+dist/
+build/
+
+# Misc
+.DS_Store
+.env
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Logs
+logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+lerna-debug.log*
+
+# Testing
+coverage
+.nyc_output
+
+# Editor directories and files
+.idea
+.vscode
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+
+# User specific exclusions
+# Markdown files
+*.md
+# Unwanted scripts
+*.sh
+*.bat
+*.ps1

@@ -1,0 +1,24 @@
+import { Router } from 'express';
+import { ProductsController } from '../controllers/ProductsController';
+import { authenticate } from '../middleware/auth';
+import { requireManager, checkManagerPermission } from '../middleware/authorize';
+
+const router = Router();
+
+// All routes require authentication
+router.use(authenticate);
+
+// GET /api/products - Get products
+router.get('/', ProductsController.getProducts);
+
+// POST /api/products - Create product (manager+)
+router.post('/', requireManager, checkManagerPermission('canCreateProducts'), ProductsController.createProduct);
+
+// PUT /api/products?id=X - Update product (manager+)
+router.put('/', requireManager, checkManagerPermission('canEditProducts'), ProductsController.updateProduct);
+
+// DELETE /api/products?id=X - Delete product (manager+)
+router.delete('/', requireManager, checkManagerPermission('canDeleteProducts'), ProductsController.deleteProduct);
+
+export default router;
+
