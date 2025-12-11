@@ -95,6 +95,13 @@ export class UserSessionsController {
     try {
       const { loginMethod = 'password', ipAddress, userAgent } = req.body;
 
+      if (!req.user) {
+        return res.status(401).json({
+          error: 'Unauthorized',
+          code: 'UNAUTHORIZED',
+        });
+      }
+
       const session = await prisma.userSession.create({
         data: {
           userId: req.user.id,
@@ -127,6 +134,13 @@ export class UserSessionsController {
 
   static async recordLogout(req: AuthRequest, res: Response) {
     try {
+      if (!req.user) {
+        return res.status(401).json({
+          error: 'Unauthorized',
+          code: 'UNAUTHORIZED',
+        });
+      }
+
       // Find the active session for the authenticated user
       const activeSession = await prisma.userSession.findFirst({
         where: {

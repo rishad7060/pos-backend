@@ -1,6 +1,10 @@
-import { drizzle } from 'drizzle-orm/libsql';
-import { createClient } from '@libsql/client';
-import * as oldSchema from '../../../src/db/schema';
+// Migration script - these imports may not be available in production
+// @ts-ignore - Migration script, may not have all dependencies
+// import { drizzle } from 'drizzle-orm/libsql';
+// @ts-ignore
+// import { createClient } from '@libsql/client';
+// @ts-ignore
+// import * as oldSchema from '../../../src/db/schema';
 import { PrismaClient } from '@prisma/client';
 import * as bcrypt from 'bcrypt';
 

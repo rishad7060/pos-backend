@@ -622,7 +622,7 @@ export class RegistrySessionsController {
    * Update session statistics from orders placed during the session
    * TEAM_003: Updated to use registrySessionId for accurate order counting
    */
-  private static async updateSessionStats(sessionId: number, startDate: Date, endDate: Date) {
+  static async updateSessionStats(sessionId: number, startDate: Date, endDate: Date) {
     // TEAM_003: Get orders by registrySessionId (accurate), with fallback to date range (for old orders)
     const ordersBySession = await prisma.order.findMany({
       where: {
@@ -684,7 +684,11 @@ export class RegistrySessionsController {
     orders.forEach((order) => {
       const total = typeof order.total === 'object' && 'toNumber' in order.total
         ? order.total.toNumber()
-        : parseFloat(order.total.toString());
+        : typeof order.total === 'string'
+          ? parseFloat(order.total)
+          : typeof order.total === 'number'
+            ? order.total
+            : 0;
 
       totalSales += total;
       uniqueCashiers.add(order.cashierId);
@@ -694,7 +698,11 @@ export class RegistrySessionsController {
         order.paymentDetails.forEach((payment) => {
           const amount = typeof payment.amount === 'object' && 'toNumber' in payment.amount
             ? payment.amount.toNumber()
-            : parseFloat(payment.amount.toString());
+            : typeof payment.amount === 'string'
+              ? parseFloat(payment.amount)
+              : typeof payment.amount === 'number'
+                ? payment.amount
+                : 0;
 
           if (payment.paymentType === 'cash') {
             cashPayments += amount;
@@ -720,7 +728,11 @@ export class RegistrySessionsController {
     cashTransactions.forEach((transaction) => {
       const amount = typeof transaction.amount === 'object' && 'toNumber' in transaction.amount
         ? transaction.amount.toNumber()
-        : parseFloat(transaction.amount.toString());
+        : typeof transaction.amount === 'string'
+          ? parseFloat(transaction.amount)
+          : typeof transaction.amount === 'number'
+            ? transaction.amount
+            : 0;
 
       if (transaction.transactionType === 'cash_in') {
         cashIn += amount;
@@ -733,7 +745,11 @@ export class RegistrySessionsController {
     refunds.forEach((refund) => {
       const amount = typeof refund.totalAmount === 'object' && 'toNumber' in refund.totalAmount
         ? refund.totalAmount.toNumber()
-        : parseFloat(refund.totalAmount.toString());
+        : typeof refund.totalAmount === 'string'
+          ? parseFloat(refund.totalAmount)
+          : typeof refund.totalAmount === 'number'
+            ? refund.totalAmount
+            : 0;
 
       cashRefunds += amount;
     });

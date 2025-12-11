@@ -366,6 +366,9 @@ export class OrdersController {
               }
 
               const currentStock = decimalToNumber(product.stockQuantity);
+              if (currentStock === null) {
+                throw new Error(`Product ${calculatedItem.productId} has null stock quantity`);
+              }
               const rawDifference = currentStock - quantityToDeduct;
 
               // Use very high precision to avoid floating point errors

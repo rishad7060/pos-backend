@@ -143,8 +143,16 @@ export class DashboardController {
       });
 
       const lowStockProducts = allProducts
-        .filter((p) => decimalToNumber(p.stockQuantity) <= decimalToNumber(p.reorderLevel))
-        .sort((a, b) => decimalToNumber(a.stockQuantity) - decimalToNumber(b.stockQuantity))
+        .filter((p) => {
+          const stockQty = decimalToNumber(p.stockQuantity);
+          const reorderLvl = decimalToNumber(p.reorderLevel);
+          return stockQty !== null && reorderLvl !== null && stockQty <= reorderLvl;
+        })
+        .sort((a, b) => {
+          const stockA = decimalToNumber(a.stockQuantity) ?? 0;
+          const stockB = decimalToNumber(b.stockQuantity) ?? 0;
+          return stockA - stockB;
+        })
         .slice(0, 10)
         .map(p => ({
           ...p,

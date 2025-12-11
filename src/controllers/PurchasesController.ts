@@ -705,6 +705,9 @@ export class PurchaseReceivesController {
             }
 
             const currentStock = decimalToNumber(product.stockQuantity);
+            if (currentStock === null) {
+              throw new Error(`Product ${product.id} has null stock quantity`);
+            }
             const newStockQuantity = Number((currentStock + quantityToAdd).toFixed(3));
 
             // Update product stock

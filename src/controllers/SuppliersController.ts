@@ -36,15 +36,17 @@ export class SuppliersController {
       // Calculate totals dynamically
       const serialized = suppliers.map(supplier => {
         // Calculate total purchases (sum of all purchase totals)
-        const totalPurchases = supplier.purchases.reduce((sum, purchase) =>
-          sum + decimalToNumber(purchase.total), 0
-        );
+        const totalPurchases = supplier.purchases.reduce((sum, purchase) => {
+          const total = decimalToNumber(purchase.total);
+          return sum + (total ?? 0);
+        }, 0);
 
         // Calculate outstanding balance (total purchases - total payments)
         const totalPaid = supplier.purchases.reduce((sum, purchase) => {
-          const paid = purchase.purchasePayments.reduce((paymentSum, payment) =>
-            paymentSum + decimalToNumber(payment.amount), 0
-          );
+          const paid = purchase.purchasePayments.reduce((paymentSum, payment) => {
+            const amount = decimalToNumber(payment.amount);
+            return paymentSum + (amount ?? 0);
+          }, 0);
           return sum + paid;
         }, 0);
 

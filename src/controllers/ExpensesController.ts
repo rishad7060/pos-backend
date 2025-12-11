@@ -188,6 +188,13 @@ export class ExpensesController {
         }
       }
 
+      if (!req.user) {
+        return res.status(401).json({
+          error: 'Unauthorized',
+          code: 'UNAUTHORIZED',
+        });
+      }
+
       const expense = await prisma.expense.create({
         data: {
           categoryId,
@@ -256,6 +263,13 @@ export class ExpensesController {
       }
 
       // Check if user can edit this expense (admin can edit all, others only their own)
+      if (!req.user) {
+        return res.status(401).json({
+          error: 'Unauthorized',
+          code: 'UNAUTHORIZED',
+        });
+      }
+
       if (req.user.role !== 'admin' && existingExpense.userId !== req.user.id) {
         return res.status(403).json({
           error: 'You can only edit your own expenses',
@@ -352,6 +366,13 @@ export class ExpensesController {
       }
 
       // Check if user can delete this expense (admin can delete all, others only their own)
+      if (!req.user) {
+        return res.status(401).json({
+          error: 'Unauthorized',
+          code: 'UNAUTHORIZED',
+        });
+      }
+
       if (req.user.role !== 'admin' && existingExpense.userId !== req.user.id) {
         return res.status(403).json({
           error: 'You can only delete your own expenses',
