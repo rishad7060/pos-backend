@@ -320,5 +320,92 @@ export class CustomersController {
       });
     }
   }
+
+  static async addManualCredit(req: AuthRequest, res: Response) {
+    try {
+      const { customerId, amount, type, description } = req.body;
+      const userId = req.user?.id;
+
+      if (!userId) {
+        return res.status(401).json({ error: 'User not authenticated', code: 'UNAUTHORIZED' });
+      }
+
+      if (!customerId || !amount || !type) {
+        return res.status(400).json({
+          error: 'Missing required fields (customerId, amount, type)',
+          code: 'MISSING_FIELDS',
+        });
+      }
+
+      if (amount <= 0) {
+        return res.status(400).json({
+          error: 'Amount must be positive',
+          code: 'INVALID_AMOUNT',
+        });
+      }
+
+      if (type !== 'credit' && type !== 'debit') {
+        return res.status(400).json({
+          error: 'Type must be "credit" (reduce debt) or "debit" (increase debt)',
+          code: 'INVALID_TYPE',
+        });
+      }
+
+      // Check if customer exists
+      const customer = await prisma.customer.findUnique({
+        where: { id: customerId },
+      });
+
+      if (!customer) {
+        return res.status(404).json({
+          error: 'Customer not found',
+          code: 'CUSTOMER_NOT_FOUND',
+        });
+      }
+
+      // Get latest transaction to determine current balance
+      const lastTransaction = await prisma.customerCredit.findFirst({
+        where: { customerId },
+        orderBy: { createdAt: 'desc' },
+      });
+
+      const currentBalance = lastTransaction ? decimalToNumber(lastTransaction.balance) : 0;
+      let newBalance = 0;
+
+      // Calculate new balance
+      // Note: Positive balance = Debt (Customer owes money)
+      // 'credit' = Customer pays or gets credit => Debt decreases
+      // 'debit' = Customer is charged => Debt increases
+      if (type === 'credit') {
+        newBalance = currentBalance - parseFloat(amount);
+      } else {
+        newBalance = currentBalance + parseFloat(amount);
+      }
+
+      const creditTransaction = await prisma.customerCredit.create({
+        data: {
+          customerId,
+          transactionType: 'admin_adjustment',
+          amount: parseFloat(amount),
+          balance: newBalance,
+          description: description || `Admin Manual ${type === 'credit' ? 'Credit' : 'Debit'}`,
+          userId,
+        },
+      });
+
+      return res.status(201).json({
+        ...creditTransaction,
+        amount: decimalToNumber(creditTransaction.amount),
+        balance: decimalToNumber(creditTransaction.balance),
+      });
+
+    } catch (error: any) {
+      console.error('Add manual credit error:', error);
+      return res.status(500).json({
+        error: 'Internal server error',
+        code: 'INTERNAL_ERROR',
+      });
+    }
+  }
 }
 

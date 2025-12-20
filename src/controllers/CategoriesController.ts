@@ -164,7 +164,7 @@ export class CategoriesController {
         });
       }
 
-      // Check if any products use this category
+      // Check if category exists
       const category = await prisma.category.findUnique({
         where: { id: categoryId },
       });
@@ -176,20 +176,18 @@ export class CategoriesController {
         });
       }
 
-      // Check if products use this category name
-      const productsWithCategory = await prisma.product.count({
+      // Unlink products that use this category name
+      // This ensures the category disappears from the list (which is derived from products)
+      await prisma.product.updateMany({
         where: {
           category: category.name,
         },
+        data: {
+          category: null,
+        },
       });
 
-      if (productsWithCategory > 0) {
-        return res.status(400).json({
-          error: `Cannot delete category. ${productsWithCategory} product(s) are using it.`,
-          code: 'CATEGORY_IN_USE',
-        });
-      }
-
+      // Delete the category record
       await prisma.category.delete({
         where: { id: categoryId },
       });

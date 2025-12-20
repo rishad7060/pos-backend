@@ -20,6 +20,9 @@ router.post('/', requireCashier, checkPermission('canCreateCustomers'), Customer
 // PUT /api/customers?id=X - Update customer (manager+)
 router.put('/', requireManager, checkManagerPermission('canEditCustomers'), CustomersController.updateCustomer);
 
+// POST /api/customers/credit - Add manual credit transaction (manager+)
+router.post('/credit', requireManager, checkManagerPermission('canEditCustomers'), CustomersController.addManualCredit);
+
 // DELETE /api/customers?id=X - Delete customer (manager+)
 router.delete('/', requireManager, checkManagerPermission('canDeleteCustomers'), CustomersController.deleteCustomer);
 

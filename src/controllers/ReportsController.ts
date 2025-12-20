@@ -47,7 +47,7 @@ export class ReportsController {
 
       // 2. PRICE VARIANCE ANALYSIS: Track price history per product
       const priceHistoryMap = new Map<number | string, Map<number, number>>(); // productId -> Map<pricePerKg, count>
-      
+
       // 3. DETAILED SALES BREAKDOWN: All order items
       const detailedSalesBreakdown: any[] = [];
 
@@ -131,7 +131,7 @@ export class ReportsController {
 
       // Build price variance analysis array
       const priceVarianceAnalysis: any[] = [];
-      
+
       // Get current product cost prices
       const productIds = Array.from(priceHistoryMap.keys()).filter((id): id is number => typeof id === 'number');
       const products = productIds.length > 0 ? await prisma.product.findMany({
@@ -149,10 +149,10 @@ export class ReportsController {
         const prices = Array.from(priceMap.keys());
         if (prices.length === 0) return;
 
-        const product = typeof productId === 'number' 
+        const product = typeof productId === 'number'
           ? products.find(p => p.id === productId)
           : null;
-        
+
         const productName = productNameMap.get(productId) || product?.name || `Product ${productId}`;
 
         const priceHistory = Array.from(priceMap.entries()).map(([price, count]) => ({
@@ -178,7 +178,7 @@ export class ReportsController {
       // Sort detailed sales breakdown
       const sortedSalesBreakdown = detailedSalesBreakdown
         .sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
-      
+
       const totalSalesCount = sortedSalesBreakdown.length;
       const limitedSalesBreakdown = sortedSalesBreakdown.slice(0, limitNum);
 
@@ -242,6 +242,11 @@ export class ReportsController {
               email: true,
             },
           },
+          order: {
+            select: {
+              orderNumber: true,
+            }
+          }
         },
         orderBy: {
           createdAt: 'desc',
@@ -260,7 +265,7 @@ export class ReportsController {
           id: record.id,
           productId: record.productId,
           userId: record.userId,
-          changeType: record.changeType as 'cost_price' | 'selling_price',
+          changeType: record.changeType as 'cost_price' | 'selling_price' | 'pos_override',
           oldPrice: Number(oldPrice.toFixed(2)),
           newPrice: Number(newPrice.toFixed(2)),
           notes: record.notes,
@@ -272,6 +277,7 @@ export class ReportsController {
           userEmail: record.user?.email || '',
           priceChange: Number(priceChange.toFixed(2)),
           percentChange: Number(percentChange.toFixed(2)),
+          orderNumber: record.order?.orderNumber || null,
         };
       });
 

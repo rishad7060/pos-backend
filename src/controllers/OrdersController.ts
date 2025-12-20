@@ -292,12 +292,12 @@ export class OrdersController {
         const products = productIds.length > 0
           ? await tx.product.findMany({
             where: { id: { in: productIds } },
-            select: { id: true, costPrice: true },
+            select: { id: true, costPrice: true, defaultPricePerKg: true, name: true },
           })
           : [];
 
-        const productCostMap = new Map(
-          products.map((p) => [p.id, p.costPrice])
+        const productMap = new Map(
+          products.map((p) => [p.id, p])
         );
 
         // Create order items and update stock using backend-calculated values
@@ -305,19 +305,20 @@ export class OrdersController {
         const stockUpdates: Array<{ productId: number; quantityChange: number; quantityAfter: number }> = [];
 
         for (const calculatedItem of calculatedItems) {
+          // Get product details
+          const product = calculatedItem.productId ? productMap.get(calculatedItem.productId) : null;
+
           // Get cost price from product
           let costPrice: number | null = null;
-          if (calculatedItem.productId) {
-            const productCost = productCostMap.get(calculatedItem.productId);
-            if (productCost != null) {
-              costPrice = typeof productCost === 'object' && 'toNumber' in productCost
-                ? productCost.toNumber()
-                : typeof productCost === 'string'
-                  ? parseFloat(productCost)
-                  : typeof productCost === 'number'
-                    ? productCost
-                    : null;
-            }
+          if (product && product.costPrice != null) {
+            const productCost = product.costPrice;
+            costPrice = typeof productCost === 'object' && 'toNumber' in productCost
+              ? productCost.toNumber()
+              : typeof productCost === 'string'
+                ? parseFloat(productCost)
+                : typeof productCost === 'number'
+                  ? productCost
+                  : null;
           }
 
           const orderItem = await tx.orderItem.create({
@@ -343,6 +344,30 @@ export class OrdersController {
               orderId: order.id,
             },
           });
+
+          // Check for Price Override (POS Edit)
+          if (product && product.defaultPricePerKg != null) {
+            const defaultPrice = typeof product.defaultPricePerKg === 'object' && 'toNumber' in product.defaultPricePerKg
+              ? product.defaultPricePerKg.toNumber()
+              : Number(product.defaultPricePerKg);
+
+            const soldPrice = calculatedItem.pricePerKg;
+
+            // Log if price differs significantly (> 0.01)
+            if (Math.abs(defaultPrice - soldPrice) > 0.01) {
+              await tx.priceChangeHistory.create({
+                data: {
+                  productId: product.id,
+                  userId: parseInt(cashierId),
+                  orderId: order.id,
+                  changeType: 'pos_override',
+                  oldPrice: defaultPrice,
+                  newPrice: soldPrice,
+                  notes: 'POS Override during sale'
+                }
+              });
+            }
+          }
 
           createdOrderItems.push(orderItem);
 

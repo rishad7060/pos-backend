@@ -247,10 +247,60 @@ export class ProductsController {
       if (minStockLevel !== undefined) updateData.minStockLevel = minStockLevel ? parseFloat(minStockLevel) : null;
       if (maxStockLevel !== undefined) updateData.maxStockLevel = maxStockLevel ? parseFloat(maxStockLevel) : null;
 
+      const existingProduct = await prisma.product.findUnique({
+        where: { id: productId },
+      });
+
       const product = await prisma.product.update({
         where: { id: productId },
         data: updateData,
       });
+
+      // Track price changes
+      if (existingProduct) {
+        // Track Selling Price Change
+        // updateData properties are numbers or null. We check strict undefined to see if it was in the payload.
+        // We constructed updateData manually above, so checks like `if (defaultPricePerKg !== undefined)` were used.
+        // But here we check `updateData` object properties.
+
+        if ('defaultPricePerKg' in updateData && updateData.defaultPricePerKg !== null) {
+          const oldPrice = existingProduct.defaultPricePerKg ? existingProduct.defaultPricePerKg.toNumber() : 0;
+          const newPrice = updateData.defaultPricePerKg;
+
+          // Only log if difference is significant
+          if (Math.abs(oldPrice - newPrice) > 0.001) {
+            await prisma.priceChangeHistory.create({
+              data: {
+                productId: product.id,
+                userId: req.user.id,
+                changeType: 'selling_price',
+                oldPrice: oldPrice,
+                newPrice: newPrice,
+                notes: 'Admin Update',
+              },
+            });
+          }
+        }
+
+        // Track Cost Price Change
+        if ('costPrice' in updateData && updateData.costPrice !== null) {
+          const oldCost = existingProduct.costPrice ? existingProduct.costPrice.toNumber() : 0;
+          const newCost = updateData.costPrice;
+
+          if (Math.abs(oldCost - newCost) > 0.001) {
+            await prisma.priceChangeHistory.create({
+              data: {
+                productId: product.id,
+                userId: req.user.id,
+                changeType: 'cost_price',
+                oldPrice: oldCost,
+                newPrice: newCost,
+                notes: 'Admin Update',
+              },
+            });
+          }
+        }
+      }
 
       // Convert Decimal types to numbers
       const serializedProduct = {

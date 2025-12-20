@@ -142,6 +142,7 @@ model Order {
   refunds         Refund[]
   stockMovements  StockMovement[]
   customerCredits CustomerCredit[]
+  priceChangeHistory PriceChangeHistory[]
 
   @@map("orders")
 }
@@ -677,6 +678,7 @@ model PriceChangeHistory {
   id         Int      @id @default(autoincrement())
   productId  Int
   userId     Int
+  orderId    Int?
   changeType String // 'cost_price' or 'selling_price'
   oldPrice   Decimal
   newPrice   Decimal
@@ -686,6 +688,7 @@ model PriceChangeHistory {
   // Relations
   product Product @relation(fields: [productId], references: [id])
   user    User    @relation(fields: [userId], references: [id])
+  order   Order?  @relation(fields: [orderId], references: [id])
 
   @@map("price_change_history")
 }
