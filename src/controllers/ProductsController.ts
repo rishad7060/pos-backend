@@ -175,6 +175,14 @@ export class ProductsController {
         maxStockLevel,
       } = req.body;
 
+      const userId = req.user?.id;
+      if (!userId) {
+        return res.status(401).json({
+          error: 'User not authenticated',
+          code: 'UNAUTHORIZED',
+        });
+      }
+
       if (!id) {
         return res.status(400).json({
           error: 'Product ID is required',
@@ -272,7 +280,7 @@ export class ProductsController {
             await prisma.priceChangeHistory.create({
               data: {
                 productId: product.id,
-                userId: req.user.id,
+                userId,
                 changeType: 'selling_price',
                 oldPrice: oldPrice,
                 newPrice: newPrice,
@@ -291,7 +299,7 @@ export class ProductsController {
             await prisma.priceChangeHistory.create({
               data: {
                 productId: product.id,
-                userId: req.user.id,
+                userId,
                 changeType: 'cost_price',
                 oldPrice: oldCost,
                 newPrice: newCost,

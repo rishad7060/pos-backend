@@ -369,7 +369,7 @@ export class CustomersController {
         orderBy: { createdAt: 'desc' },
       });
 
-      const currentBalance = lastTransaction ? decimalToNumber(lastTransaction.balance) : 0;
+      const currentBalance = lastTransaction ? decimalToNumber(lastTransaction.balance) ?? 0 : 0;
       let newBalance = 0;
 
       // Calculate new balance
