@@ -6,9 +6,15 @@ import { decimalToNumber } from '../utils/decimal';
 export class ProductsController {
   static async getProducts(req: AuthRequest, res: Response) {
     try {
-      const { isActive, limit } = req.query;
+      const { isActive, limit, includeDeleted } = req.query;
 
       const where: any = {};
+
+      // Exclude soft-deleted products by default
+      if (includeDeleted !== 'true') {
+        where.deletedAt = null;
+      }
+
       if (isActive !== undefined) {
         where.isActive = isActive === 'true';
       }
@@ -342,7 +348,16 @@ export class ProductsController {
 
   static async deleteProduct(req: AuthRequest, res: Response) {
     try {
-      const { id } = req.query;
+      const { id, force } = req.query;
+      const userId = req.user?.id;
+      const userRole = req.user?.role;
+
+      if (!userId) {
+        return res.status(401).json({
+          error: 'User not authenticated',
+          code: 'UNAUTHORIZED',
+        });
+      }
 
       if (!id) {
         return res.status(400).json({
@@ -359,11 +374,116 @@ export class ProductsController {
         });
       }
 
-      await prisma.product.delete({
+      // Check if product exists
+      const product = await prisma.product.findUnique({
         where: { id: productId },
       });
 
-      return res.json({ message: 'Product deleted successfully' });
+      if (!product) {
+        return res.status(404).json({
+          error: 'Product not found',
+          code: 'PRODUCT_NOT_FOUND',
+        });
+      }
+
+      if (product.deletedAt) {
+        return res.status(400).json({
+          error: 'Product is already deleted',
+          code: 'ALREADY_DELETED',
+        });
+      }
+
+      // Force delete flag - only admins can bypass safety checks
+      const forceDelete = force === 'true' && userRole === 'admin';
+
+      // Check for dependencies: active orders with this product (skip if force delete)
+      if (!forceDelete) {
+        const activeOrdersCount = await prisma.orderItem.count({
+          where: {
+            productId: productId,
+            order: {
+              status: 'completed',
+              createdAt: {
+                gte: new Date(Date.now() - 30 * 24 * 60 * 60 * 1000), // Last 30 days
+              },
+            },
+          },
+        });
+
+        if (activeOrdersCount > 0) {
+          return res.status(400).json({
+            error: `Cannot delete product. It has been used in ${activeOrdersCount} order(s) in the last 30 days.`,
+            code: 'PRODUCT_IN_USE',
+            details: {
+              activeOrdersCount,
+              suggestion: 'Consider marking the product as inactive instead of deleting it.',
+              canForceDelete: userRole === 'admin', // Tell frontend if force delete is available
+            },
+          });
+        }
+
+        // Check for pending purchase orders
+        const pendingPurchaseCount = await prisma.purchaseItem.count({
+          where: {
+            productId: productId,
+            purchase: {
+              status: {
+                in: ['pending', 'partially_received'],
+              },
+            },
+          },
+        });
+
+        if (pendingPurchaseCount > 0) {
+          return res.status(400).json({
+            error: `Cannot delete product. It has ${pendingPurchaseCount} pending purchase order(s).`,
+            code: 'PENDING_PURCHASES',
+            details: {
+              pendingPurchaseCount,
+              suggestion: 'Complete or cancel pending purchase orders before deleting this product.',
+              canForceDelete: userRole === 'admin',
+            },
+          });
+        }
+      }
+
+      // Perform soft delete
+      const deletedProduct = await prisma.product.update({
+        where: { id: productId },
+        data: {
+          deletedAt: new Date(),
+          deletedBy: userId,
+          isActive: false, // Also mark as inactive
+        },
+      });
+
+      // Create audit log entry
+      await prisma.auditLog.create({
+        data: {
+          userId,
+          action: 'DELETE',
+          entityType: 'Product',
+          entityId: productId,
+          changes: JSON.stringify({
+            productName: product.name,
+            sku: product.sku,
+            stockQuantity: product.stockQuantity.toString(),
+            deletedAt: new Date().toISOString(),
+            forceDelete: forceDelete,
+          }),
+          notes: `Product "${product.name}" (SKU: ${product.sku || 'N/A'}) soft deleted${forceDelete ? ' (FORCE DELETE - bypassed safety checks)' : ''}`,
+        },
+      });
+
+      return res.json({
+        success: true,
+        message: 'Product deleted successfully',
+        data: {
+          id: deletedProduct.id,
+          name: deletedProduct.name,
+          deletedAt: deletedProduct.deletedAt,
+        },
+      });
     } catch (error: any) {
       console.error('Delete product error:', error);
       if (error.code === 'P2025') {
@@ -372,6 +492,96 @@ export class ProductsController {
           code: 'PRODUCT_NOT_FOUND',
         });
       }
+      return res.status(500).json({
+        error: 'Internal server error',
+        code: 'INTERNAL_ERROR',
+      });
+    }
+  }
+
+  // New method to restore soft-deleted products
+  static async restoreProduct(req: AuthRequest, res: Response) {
+    try {
+      const { id } = req.query;
+      const userId = req.user?.id;
+
+      if (!userId) {
+        return res.status(401).json({
+          error: 'User not authenticated',
+          code: 'UNAUTHORIZED',
+        });
+      }
+
+      if (!id) {
+        return res.status(400).json({
+          error: 'Product ID is required',
+          code: 'MISSING_ID',
+        });
+      }
+
+      const productId = parseInt(id as string);
+      if (isNaN(productId)) {
+        return res.status(400).json({
+          error: 'Invalid product ID',
+          code: 'INVALID_ID',
+        });
+      }
+
+      const product = await prisma.product.findUnique({
+        where: { id: productId },
+      });
+
+      if (!product) {
+        return res.status(404).json({
+          error: 'Product not found',
+          code: 'PRODUCT_NOT_FOUND',
+        });
+      }
+
+      if (!product.deletedAt) {
+        return res.status(400).json({
+          error: 'Product is not deleted',
+          code: 'NOT_DELETED',
+        });
+      }
+
+      const restoredProduct = await prisma.product.update({
+        where: { id: productId },
+        data: {
+          deletedAt: null,
+          deletedBy: null,
+        },
+      });
+
+      // Create audit log entry
+      await prisma.auditLog.create({
+        data: {
+          userId,
+          action: 'RESTORE',
+          entityType: 'Product',
+          entityId: productId,
+          changes: JSON.stringify({
+            productName: product.name,
+            restoredAt: new Date().toISOString(),
+          }),
+          notes: `Product "${product.name}" restored from deletion`,
+        },
+      });
+
+      const serializedProduct = {
+        ...restoredProduct,
+        defaultPricePerKg: decimalToNumber(restoredProduct.defaultPricePerKg),
+        costPrice: decimalToNumber(restoredProduct.costPrice),
+        stockQuantity: decimalToNumber(restoredProduct.stockQuantity),
+      };
+
+      return res.json({
+        success: true,
+        message: 'Product restored successfully',
+        data: serializedProduct,
+      });
+    } catch (error: any) {
+      console.error('Restore product error:', error);
       return res.status(500).json({
         error: 'Internal server error',
         code: 'INTERNAL_ERROR',

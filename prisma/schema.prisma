@@ -12,14 +12,16 @@ datasource db {
 
 // Users table for authentication and role management
 model User {
-  id           Int      @id @default(autoincrement())
-  email        String   @unique
+  id           Int       @id @default(autoincrement())
+  email        String    @unique
   passwordHash String
   fullName     String
   role         String // 'admin', 'manager', or 'cashier'
-  isActive     Boolean  @default(true)
-  createdAt    DateTime @default(now())
-  updatedAt    DateTime @updatedAt
+  isActive     Boolean   @default(true)
+  deletedAt    DateTime? // Soft delete timestamp
+  deletedBy    Int?      // User who deleted this record
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
 
   // Relations
   orders                    Order[]
@@ -40,6 +42,7 @@ model User {
   branchManager             Branch?              @relation("BranchManager")
   holdOrders                HoldOrder[]
   customerCredits           CustomerCredit[]
+  supplierCredits           SupplierCredit[]
   priceChangeHistory        PriceChangeHistory[]
   refundApprovedBy          Refund[]             @relation("RefundApprovedBy")
   cashTransactionApprovedBy CashTransaction[]    @relation("CashTransactionApprovedBy")
@@ -51,25 +54,27 @@ model User {
 
 // Products table for inventory management
 model Product {
-  id                Int      @id @default(autoincrement())
+  id                Int       @id @default(autoincrement())
   name              String
   description       String?
   defaultPricePerKg Decimal?
   category          String?
-  isActive          Boolean  @default(true)
-  sku               String?  @unique
-  barcode           String?  @unique
+  isActive          Boolean   @default(true)
+  sku               String?   @unique
+  barcode           String?   @unique
   imageUrl          String?
-  stockQuantity     Decimal  @default(0)
-  reorderLevel      Decimal  @default(10)
-  unitType          String   @default("weight") // 'weight' or 'unit'
+  stockQuantity     Decimal   @default(0)
+  reorderLevel      Decimal   @default(10)
+  unitType          String    @default("weight") // 'weight' or 'unit'
   costPrice         Decimal?
-  alertsEnabled     Boolean  @default(true)
+  alertsEnabled     Boolean   @default(true)
   alertEmail        String?
   minStockLevel     Decimal?
   maxStockLevel     Decimal?
-  createdAt         DateTime @default(now())
-  updatedAt         DateTime @updatedAt
+  deletedAt         DateTime? // Soft delete timestamp
+  deletedBy         Int?      // User who deleted this record
+  createdAt         DateTime  @default(now())
+  updatedAt         DateTime  @updatedAt
 
   // Relations
   orderItems         OrderItem[]
@@ -83,15 +88,17 @@ model Product {
 
 // Customers table
 model Customer {
-  id             Int      @id @default(autoincrement())
+  id             Int       @id @default(autoincrement())
   name           String
-  phone          String?  @unique
-  email          String?  @unique
+  phone          String?   @unique
+  email          String?   @unique
   address        String?
-  totalPurchases Decimal  @default(0)
-  visitCount     Int      @default(0)
-  createdAt      DateTime @default(now())
-  updatedAt      DateTime @updatedAt
+  totalPurchases Decimal   @default(0)
+  visitCount     Int       @default(0)
+  deletedAt      DateTime? // Soft delete timestamp
+  deletedBy      Int?      // User who deleted this record
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
 
   // Relations
   orders          Order[]
@@ -201,16 +208,18 @@ model StockMovement {
 
 // Business settings table for receipt customization
 model BusinessSetting {
-  id            Int      @id @default(autoincrement())
-  businessName  String
-  address       String?
-  phone         String?
-  email         String?
-  taxRate       Decimal  @default(0)
-  logoUrl       String?
-  receiptFooter String?
-  createdAt     DateTime @default(now())
-  updatedAt     DateTime @updatedAt
+  id                      Int      @id @default(autoincrement())
+  businessName            String
+  address                 String?
+  phone                   String?
+  email                   String?
+  taxRate                 Decimal  @default(0)
+  logoUrl                 String?
+  receiptFooter           String?
+  creditDueDays           Int      @default(7)    // Days before customer credit is considered overdue
+  enableCreditAlerts      Boolean  @default(true) // Enable/disable overdue credit alerts
+  createdAt               DateTime @default(now())
+  updatedAt               DateTime @updatedAt
 
   @@map("business_settings")
 }
@@ -388,7 +397,7 @@ model Branch {
 
 // Suppliers table
 model Supplier {
-  id                 Int      @id @default(autoincrement())
+  id                 Int       @id @default(autoincrement())
   name               String
   contactPerson      String?
   phone              String?
@@ -396,15 +405,18 @@ model Supplier {
   address            String?
   taxId              String?
   paymentTerms       String?
-  totalPurchases     Decimal  @default(0)
-  outstandingBalance Decimal  @default(0)
-  isActive           Boolean  @default(true)
+  totalPurchases     Decimal   @default(0)
+  outstandingBalance Decimal   @default(0)
+  isActive           Boolean   @default(true)
   notes              String?
-  createdAt          DateTime @default(now())
-  updatedAt          DateTime @updatedAt
+  deletedAt          DateTime? // Soft delete timestamp
+  deletedBy          Int?      // User who deleted this record
+  createdAt          DateTime  @default(now())
+  updatedAt          DateTime  @updatedAt
 
   // Relations
-  purchases Purchase[]
+  purchases       Purchase[]
+  supplierCredits SupplierCredit[]
 
   @@map("suppliers")
 }
@@ -426,6 +438,8 @@ model Purchase {
   expectedDate   DateTime?
   receivedDate   DateTime?
   notes          String?
+  deletedAt      DateTime? // Soft delete timestamp
+  deletedBy      Int?      // User who deleted this record
   createdAt      DateTime  @default(now())
   updatedAt      DateTime  @updatedAt
 
@@ -436,6 +450,7 @@ model Purchase {
   purchaseItems    PurchaseItem[]
   purchasePayments PurchasePayment[]
   purchaseReceives PurchaseReceive[]
+  supplierCredits  SupplierCredit[]
 
   @@map("purchases")
 }
@@ -496,6 +511,26 @@ model PurchaseReceive {
   user         User         @relation(fields: [userId], references: [id])
 
   @@map("purchase_receives")
+}
+
+// Supplier credits table for tracking manual credits/debits and outstanding balances
+model SupplierCredit {
+  id              Int      @id @default(autoincrement())
+  supplierId      Int
+  purchaseId      Int?     // Optional link to purchase order
+  transactionType String   // 'credit' (increases outstanding), 'debit' (payment/decreases outstanding), 'admin_credit' (manual admin entry)
+  amount          Decimal  // Positive for credits (we owe), negative for debits (payments made)
+  balance         Decimal  // Running balance after this transaction
+  description     String?
+  userId          Int?     // Admin/user who created this entry
+  createdAt       DateTime @default(now())
+
+  // Relations
+  supplier Supplier  @relation(fields: [supplierId], references: [id])
+  purchase Purchase? @relation(fields: [purchaseId], references: [id])
+  user     User?     @relation(fields: [userId], references: [id])
+
+  @@map("supplier_credits")
 }
 
 // Expense categories table

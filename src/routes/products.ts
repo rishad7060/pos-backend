@@ -20,5 +20,8 @@ router.put('/', requireManager, checkManagerPermission('canEditProducts'), Produ
 // DELETE /api/products?id=X - Delete product (manager+)
 router.delete('/', requireManager, checkManagerPermission('canDeleteProducts'), ProductsController.deleteProduct);
 
+// POST /api/products/restore?id=X - Restore soft-deleted product (manager+)
+router.post('/restore', requireManager, checkManagerPermission('canCreateProducts'), ProductsController.restoreProduct);
+
 export default router;
 

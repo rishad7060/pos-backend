@@ -9,6 +9,9 @@ const router = Router();
 router.use(authenticate);
 router.use(requireManager);
 
+// GET /api/customer-credits/overdue - Get overdue customers (must be before /)
+router.get('/overdue', CustomerCreditsController.getOverdueCustomers);
+
 // GET /api/customer-credits - Get customer credits
 router.get('/', CustomerCreditsController.getCustomerCredits);
 

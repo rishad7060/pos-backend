@@ -20,6 +20,8 @@ export class SettingsController {
                         taxRate: 0,
                         logoUrl: '',
                         receiptFooter: 'Thank you for your business!',
+                        creditDueDays: 7,
+                        enableCreditAlerts: true,
                     },
                 });
             }
@@ -72,6 +74,8 @@ export class SettingsController {
                 taxRate,
                 logoUrl,
                 receiptFooter,
+                creditDueDays,
+                enableCreditAlerts,
             } = req.body;
 
             // Get existing settings
@@ -85,6 +89,8 @@ export class SettingsController {
             if (taxRate !== undefined) updateData.taxRate = parseFloat(taxRate);
             if (logoUrl !== undefined) updateData.logoUrl = logoUrl;
             if (receiptFooter !== undefined) updateData.receiptFooter = receiptFooter;
+            if (creditDueDays !== undefined) updateData.creditDueDays = parseInt(creditDueDays);
+            if (enableCreditAlerts !== undefined) updateData.enableCreditAlerts = enableCreditAlerts;
 
             if (businessSettings) {
                 // Update existing settings
@@ -103,6 +109,8 @@ export class SettingsController {
                         taxRate: taxRate ? parseFloat(taxRate) : 0,
                         logoUrl: logoUrl || '',
                         receiptFooter: receiptFooter || 'Thank you for your business!',
+                        creditDueDays: creditDueDays ? parseInt(creditDueDays) : 7,
+                        enableCreditAlerts: enableCreditAlerts !== undefined ? enableCreditAlerts : true,
                     },
                 });
             }

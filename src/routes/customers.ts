@@ -26,5 +26,8 @@ router.post('/credit', requireManager, checkManagerPermission('canEditCustomers'
 // DELETE /api/customers?id=X - Delete customer (manager+)
 router.delete('/', requireManager, checkManagerPermission('canDeleteCustomers'), CustomersController.deleteCustomer);
 
+// POST /api/customers/restore?id=X - Restore soft-deleted customer (manager+)
+router.post('/restore', requireManager, checkManagerPermission('canCreateCustomers'), CustomersController.restoreCustomer);
+
 export default router;
 

@@ -194,6 +194,84 @@ export class OrdersController {
         });
       }
 
+      // CRITICAL FIX EDGE-001: Check stock availability BEFORE processing order
+      // Collect all product IDs that need stock validation
+      const productStockChecks: Array<{ productId: number; requiredQuantity: number; itemName: string }> = [];
+
+      for (const rawItem of items) {
+        if (rawItem.productId) {
+          const productId = parseInt(rawItem.productId);
+          const quantityType = rawItem.quantityType || 'kg';
+
+          // Calculate required quantity based on type
+          let requiredQuantity = 0;
+          if (quantityType === 'kg' || quantityType === 'g' || quantityType === 'box') {
+            // For weight-based items, calculate net weight
+            const itemWeightKg = parseFloat(rawItem.itemWeightKg) || 0;
+            const itemWeightG = parseFloat(rawItem.itemWeightG) || 0;
+            const itemWeightTotalKg = itemWeightKg + (itemWeightG / 1000);
+
+            const boxWeightKg = rawItem.boxWeightKg ? parseFloat(rawItem.boxWeightKg) : 0;
+            const boxWeightG = rawItem.boxWeightG ? parseFloat(rawItem.boxWeightG) : 0;
+            const boxCount = rawItem.boxCount ? parseInt(rawItem.boxCount) : 0;
+            const boxWeightPerBoxKg = boxWeightKg + (boxWeightG / 1000);
+            const totalBoxWeightKg = boxWeightPerBoxKg * boxCount;
+
+            requiredQuantity = itemWeightTotalKg - totalBoxWeightKg;
+          } else {
+            // For unit-based items
+            requiredQuantity = rawItem.boxCount ? parseInt(rawItem.boxCount) : 1;
+          }
+
+          productStockChecks.push({
+            productId,
+            requiredQuantity,
+            itemName: rawItem.itemName || 'Unknown Item'
+          });
+        }
+      }
+
+      // PERFORMANCE OPTIMIZATION: Batch query all products at once instead of individual queries
+      const productIds = productStockChecks.map(check => check.productId);
+      const products = await prisma.product.findMany({
+        where: { id: { in: productIds } },
+        select: { id: true, stockQuantity: true, name: true, unitType: true },
+      });
+
+      // Create a map for quick lookup
+      const productMap = new Map(products.map(p => [p.id, p]));
+
+      // Validate stock for all products
+      for (const check of productStockChecks) {
+        const product = productMap.get(check.productId);
+
+        if (product) {
+          const currentStock = decimalToNumber(product.stockQuantity) || 0;
+
+          // CRITICAL: Prevent sale if insufficient stock
+          if (currentStock < check.requiredQuantity) {
+            return res.status(400).json({
+              error: `Insufficient stock for ${product.name || check.itemName}. Available: ${currentStock.toFixed(3)}, Required: ${check.requiredQuantity.toFixed(3)}`,
+              code: 'INSUFFICIENT_STOCK',
+              productId: check.productId,
+              productName: product.name || check.itemName,
+              availableStock: currentStock,
+              requiredStock: check.requiredQuantity,
+            });
+          }
+
+          // CRITICAL: Prevent sale if stock is zero or negative
+          if (currentStock <= 0) {
+            return res.status(400).json({
+              error: `Product ${product.name || check.itemName} is out of stock`,
+              code: 'OUT_OF_STOCK',
+              productId: check.productId,
+              productName: product.name || check.itemName,
+            });
+          }
+        }
+      }
+
       // Use transaction to ensure atomicity
       const result = await prisma.$transaction(async (tx) => {
         // Generate unique order number (format: ORD-YYYYMMDD-HHMMSS-XXXX)

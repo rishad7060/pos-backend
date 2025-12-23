@@ -21,5 +21,8 @@ router.put('/', checkManagerPermission('canEditSuppliers'), SuppliersController.
 // DELETE /api/suppliers?id=X - Delete supplier
 router.delete('/', checkManagerPermission('canDeleteSuppliers'), SuppliersController.deleteSupplier);
 
+// POST /api/suppliers/restore?id=X - Restore soft-deleted supplier
+router.post('/restore', checkManagerPermission('canCreateSuppliers'), SuppliersController.restoreSupplier);
+
 export default router;
 
