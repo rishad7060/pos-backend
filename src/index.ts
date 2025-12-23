@@ -7,7 +7,7 @@ import { apiLimiter } from './middleware/rate-limit';
 dotenv.config();
 
 const app = express();
-const PORT = process.env.PORT || 3005;
+const PORT = process.env.PORT || 3001;
 
 // Middleware
 app.use(cors({
@@ -59,6 +59,7 @@ import printRoutes from './routes/print';
 import paymentDetailsRoutes from './routes/payment-details';
 import settingsRoutes from './routes/settings';
 import stockMovementsRoutes from './routes/stock-movements';
+import chequesRoutes from './routes/cheques';
 
 app.use('/api/auth', authRoutes);
 app.use('/api/orders', ordersRoutes);
@@ -93,6 +94,7 @@ app.use('/api/print', printRoutes);
 app.use('/api/payment-details', paymentDetailsRoutes);
 app.use('/api/settings', settingsRoutes);
 app.use('/api/stock-movements', stockMovementsRoutes);
+app.use('/api/cheques', chequesRoutes);
 
 // 404 handler
 app.use('*', (req, res) => {

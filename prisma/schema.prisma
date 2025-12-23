@@ -48,6 +48,9 @@ model User {
   cashTransactionApprovedBy CashTransaction[]    @relation("CashTransactionApprovedBy")
   userSessions              UserSession[]
   cashTransactions          CashTransaction[]
+  chequesRecorded           Cheque[]             @relation("ChequeRecordedBy")
+  chequesApproved           Cheque[]             @relation("ChequeApprovedBy")
+  chequesEndorsed           Cheque[]             @relation("ChequeEndorsedBy")
 
   @@map("users")
 }
@@ -105,6 +108,7 @@ model Customer {
   refunds         Refund[]
   customerCredits CustomerCredit[]
   holdOrders      HoldOrder[]
+  cheques         Cheque[]
 
   @@map("customers")
 }
@@ -150,6 +154,7 @@ model Order {
   stockMovements  StockMovement[]
   customerCredits CustomerCredit[]
   priceChangeHistory PriceChangeHistory[]
+  cheques         Cheque[]
 
   @@map("orders")
 }
@@ -417,6 +422,7 @@ model Supplier {
   // Relations
   purchases       Purchase[]
   supplierCredits SupplierCredit[]
+  cheques         Cheque[]
 
   @@map("suppliers")
 }
@@ -490,6 +496,7 @@ model PurchasePayment {
   // Relations
   purchase Purchase @relation(fields: [purchaseId], references: [id])
   user     User?    @relation(fields: [userId], references: [id])
+  cheques  Cheque[]
 
   @@map("purchase_payments")
 }
@@ -824,4 +831,70 @@ model CashTransaction {
   approvedByUser  User?           @relation("CashTransactionApprovedBy", fields: [approvedBy], references: [id])
 
   @@map("cash_transactions")
+}
+
+// Cheque tracking table for managing cheque payments and receipts
+model Cheque {
+  id                  Int       @id @default(autoincrement())
+  chequeNumber        String    @unique // Unique cheque number
+  chequeDate          DateTime  // Date on the cheque
+  amount              Decimal   // Cheque amount
+
+  // Payer/Payee Information
+  payerName           String    // Name on the cheque (customer or supplier)
+  payeeName           String?   // To whom the cheque is payable
+
+  // Bank Details
+  bankName            String    // Bank name
+  branchName          String?   // Bank branch
+
+  // Cheque Status Lifecycle
+  status              String    @default("pending") // pending, deposited, cleared, bounced, cancelled
+
+  // Transaction Type
+  transactionType     String    // 'received' (customer gave us), 'issued' (we gave to supplier)
+
+  // Dates Tracking
+  receivedDate        DateTime? // When cheque was received
+  depositDate         DateTime? // When deposited to bank
+  depositReminderDate DateTime? // When to deposit this cheque (reminder date)
+  clearanceDate       DateTime? // When cleared by bank
+  bounceDate          DateTime? // If bounced, when it bounced
+
+  // Relations to other entities
+  orderId             Int?      // If payment for customer order
+  customerId          Int?      // Customer who gave the cheque
+  purchasePaymentId   Int?      // If payment to supplier
+  supplierId          Int?      // Supplier who received/gave the cheque
+
+  // User tracking
+  userId              Int?      // User who recorded the cheque
+  approvedBy          Int?      // User who approved/verified
+
+  // Endorsement/Transfer tracking
+  isEndorsed          Boolean   @default(false) // If cheque was endorsed to another party
+  endorsedTo          String?   // Name of party cheque was endorsed to
+  endorsedDate        DateTime? // When cheque was endorsed
+  endorsedById        Int?      // User who endorsed the cheque
+
+  // Additional Info
+  notes               String?   // Any additional notes
+  bounceReason        String?   // Reason if bounced
+  reminderSent        Boolean   @default(false) // If reminder was sent
+  lastReminderDate    DateTime? // Last reminder notification date
+
+  // Timestamps
+  createdAt           DateTime  @default(now())
+  updatedAt           DateTime  @updatedAt
+
+  // Relations
+  order           Order?           @relation(fields: [orderId], references: [id])
+  customer        Customer?        @relation(fields: [customerId], references: [id])
+  purchasePayment PurchasePayment? @relation(fields: [purchasePaymentId], references: [id])
+  supplier        Supplier?        @relation(fields: [supplierId], references: [id])
+  user            User?            @relation("ChequeRecordedBy", fields: [userId], references: [id])
+  approver        User?            @relation("ChequeApprovedBy", fields: [approvedBy], references: [id])
+  endorsedByUser  User?            @relation("ChequeEndorsedBy", fields: [endorsedById], references: [id])
+
+  @@map("cheques")
 }

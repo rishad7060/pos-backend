@@ -442,6 +442,7 @@ export class PurchasePaymentsController {
         reference,
         notes,
         userId,
+        existingChequeId,
       } = req.body;
 
       if (!purchaseId || !amount) {
@@ -471,11 +472,12 @@ export class PurchasePaymentsController {
       }, 0);
 
       const total = decimalToNumber(purchase.total) ?? 0;
+      const remainingBalance = total - currentPaid;
       const newPaid = currentPaid + parseFloat(amount);
 
       if (newPaid > total) {
         return res.status(400).json({
-          error: `Payment amount exceeds remaining balance. Remaining: LKR ${(total - currentPaid).toFixed(2)}`,
+          error: `Payment amount (LKR ${parseFloat(amount).toFixed(2)}) exceeds remaining balance (LKR ${remainingBalance.toFixed(2)})`,
           code: 'PAYMENT_EXCEEDS_BALANCE',
         });
       }
@@ -513,6 +515,86 @@ export class PurchasePaymentsController {
             paymentStatus: newPaymentStatus,
           },
         });
+
+        // Handle cheque payment
+        if (paymentMethod === 'cheque') {
+          if (existingChequeId) {
+            // Link and endorse existing cheque
+            const existingCheque = await tx.cheque.findUnique({
+              where: { id: parseInt(existingChequeId) },
+            });
+
+            if (!existingCheque) {
+              throw new Error('Existing cheque not found');
+            }
+
+            if (existingCheque.status !== 'pending') {
+              throw new Error('Can only use pending cheques');
+            }
+
+            if (existingCheque.transactionType !== 'received') {
+              throw new Error('Can only use received cheques for purchase payments');
+            }
+
+            if (existingCheque.isEndorsed) {
+              throw new Error('Cheque is already endorsed');
+            }
+
+            // Get supplier name for endorsement
+            const supplier = await tx.supplier.findUnique({
+              where: { id: purchase.supplierId },
+              select: { name: true },
+            });
+
+            // Update cheque to link to purchase payment and mark as endorsed
+            await tx.cheque.update({
+              where: { id: parseInt(existingChequeId) },
+              data: {
+                purchasePaymentId: payment.id,
+                isEndorsed: true,
+                endorsedTo: supplier?.name || 'Supplier',
+                endorsedDate: new Date(),
+                endorsedById: userId ? parseInt(userId) : req.user?.id || null,
+                notes: existingCheque.notes
+                  ? `${existingCheque.notes} | Endorsed to ${supplier?.name || 'Supplier'} for Purchase #${purchase.purchaseNumber}`
+                  : `Endorsed to ${supplier?.name || 'Supplier'} for Purchase #${purchase.purchaseNumber}`,
+                updatedAt: new Date(),
+              },
+            });
+          } else if (req.body.chequeDetails) {
+            // Create new cheque record
+            const {
+              chequeNumber,
+              chequeDate,
+              depositReminderDate,
+              payerName,
+              payeeName,
+              bankName,
+              branchName,
+              notes: chequeNotes,
+            } = req.body.chequeDetails;
+
+            await tx.cheque.create({
+              data: {
+                chequeNumber,
+                chequeDate: new Date(chequeDate),
+                depositReminderDate: depositReminderDate ? new Date(depositReminderDate) : null,
+                amount: parseFloat(amount),
+                payerName,
+                payeeName: payeeName || null,
+                bankName,
+                branchName: branchName || null,
+                status: 'pending',
+                transactionType: 'issued',
+                receivedDate: new Date(),
+                purchasePaymentId: payment.id,
+                supplierId: purchase.supplierId,
+                userId: userId ? parseInt(userId) : req.user?.id || null,
+                notes: chequeNotes || `Cheque issued for Purchase #${purchase.purchaseNumber}`,
+              },
+            });
+          }
+        }
 
         return payment;
       });

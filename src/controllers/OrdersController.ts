@@ -593,6 +593,74 @@ export class OrdersController {
           });
         }
 
+        // Handle cheque payments - create cheque records
+        if (payments && Array.isArray(payments)) {
+          const chequePayments = payments.filter((p: any) => p.type === 'cheque');
+
+          for (const chequePayment of chequePayments) {
+            if (chequePayment.chequeDetails) {
+              const {
+                chequeNumber,
+                chequeDate,
+                payerName,
+                payeeName,
+                bankName,
+                branchName,
+                notes,
+              } = chequePayment.chequeDetails;
+
+              await tx.cheque.create({
+                data: {
+                  chequeNumber,
+                  chequeDate: new Date(chequeDate),
+                  amount: parseFloat(chequePayment.amount),
+                  payerName,
+                  payeeName: payeeName || null,
+                  bankName,
+                  branchName: branchName || null,
+                  status: 'pending',
+                  transactionType: 'received',
+                  receivedDate: new Date(),
+                  orderId: order.id,
+                  customerId: customerId ? parseInt(customerId) : null,
+                  userId: parseInt(cashierId),
+                  notes: notes || `Cheque received for Order #${orderNumber}`,
+                },
+              });
+            }
+          }
+        } else if (paymentMethod === 'cheque' && req.body.chequeDetails) {
+          // Single cheque payment
+          const {
+            chequeNumber,
+            chequeDate,
+            payerName,
+            payeeName,
+            bankName,
+            branchName,
+            notes,
+          } = req.body.chequeDetails;
+
+          await tx.cheque.create({
+            data: {
+              chequeNumber,
+              chequeDate: new Date(chequeDate),
+              amount: orderTotals.total,
+              payerName,
+              payeeName: payeeName || null,
+              bankName,
+              branchName: branchName || null,
+              status: 'pending',
+              transactionType: 'received',
+              receivedDate: new Date(),
+              orderId: order.id,
+              customerId: customerId ? parseInt(customerId) : null,
+              userId: parseInt(cashierId),
+              notes: notes || `Cheque received for Order #${orderNumber}`,
+            },
+          });
+        }
+
         // Fetch the complete order with relations
         const completeOrder = await tx.order.findUnique({
           where: { id: order.id },
