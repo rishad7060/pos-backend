@@ -520,25 +520,40 @@ export class OrdersController {
         // Create payment details for split payments
         if (payments && Array.isArray(payments) && payments.length > 0) {
           for (const payment of payments) {
+            const paymentType = payment.type || paymentMethod;
+
+            // Ensure cheque payments always store the cheque number as reference
+            let reference: string | null = payment.reference || null;
+            if (!reference && paymentType === 'cheque' && payment.chequeDetails?.chequeNumber) {
+              reference = payment.chequeDetails.chequeNumber;
+            }
+
             await tx.paymentDetail.create({
               data: {
                 orderId: order.id,
-                paymentType: payment.type || paymentMethod,
+                paymentType,
                 amount: parseFloat(payment.amount) || 0,
                 cardType: payment.cardType || null,
-                reference: payment.reference || null,
+                reference,
               },
             });
           }
         } else if (paymentMethod !== 'cash') {
           // Create single payment detail for non-cash payments
+          let reference: string | null = req.body.reference || null;
+
+          // Fallback for single cheque payments: use cheque number as reference
+          if (!reference && paymentMethod === 'cheque' && req.body.chequeDetails?.chequeNumber) {
+            reference = req.body.chequeDetails.chequeNumber;
+          }
+
           await tx.paymentDetail.create({
             data: {
               orderId: order.id,
               paymentType: paymentMethod,
               amount: orderTotals.total,
               cardType: req.body.cardType || null,
-              reference: req.body.reference || null,
+              reference,
             },
           });
         }
