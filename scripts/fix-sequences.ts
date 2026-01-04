@@ -49,24 +49,19 @@ async function fixSequences() {
       try {
         // Reset sequence to max(id) + 1
         await prisma.$executeRawUnsafe(`
-          SELECT setval(
-            pg_get_serial_sequence('${table}', 'id'),
-            (SELECT COALESCE(MAX(id), 0) + 1 FROM ${table}),
-            false
-          );
+          SELECT setval('${table}_id_seq', (SELECT COALESCE(MAX(id), 0) + 1 FROM ${table}), false);
         `);
 
         // Get the new sequence value
         const result: any = await prisma.$queryRawUnsafe(`
-          SELECT last_value
-          FROM pg_get_serial_sequence('${table}', 'id')::regclass;
+          SELECT last_value FROM ${table}_id_seq;
         `);
 
         const nextId = result[0]?.last_value || 'N/A';
         console.log(`✅ ${table.padEnd(25)} - Next ID: ${nextId}`);
       } catch (error: any) {
         // Skip tables that don't exist or don't have id sequence
-        if (error.message.includes('does not exist') || error.message.includes('null')) {
+        if (error.message.includes('does not exist') || error.message.includes('relation') || error.message.includes('null')) {
           console.log(`⏭️  ${table.padEnd(25)} - Skipped (no sequence)`);
         } else {
           console.error(`❌ ${table.padEnd(25)} - Error: ${error.message}`);
