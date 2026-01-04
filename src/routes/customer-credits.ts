@@ -9,13 +9,19 @@ const router = Router();
 router.use(authenticate);
 router.use(requireManager);
 
-// GET /api/customer-credits/overdue - Get overdue customers (must be before /)
+// GET /api/customer-credits/overdue - Get overdue customers (specific routes first)
 router.get('/overdue', CustomerCreditsController.getOverdueCustomers);
 
-// GET /api/customer-credits - Get customer credits
+// GET /api/customer-credits/summary - Get credit summary report
+router.get('/summary', CustomerCreditsController.getCreditSummary);
+
+// GET /api/customer-credits/customers - Get all customers with credit balances
+router.get('/customers', CustomerCreditsController.getCustomersWithCredit);
+
+// GET /api/customer-credits - Get customer credits (query param: customerId)
 router.get('/', CustomerCreditsController.getCustomerCredits);
 
-// POST /api/customer-credits - Create customer credit transaction
+// POST /api/customer-credits - Create customer credit transaction (LIABILITY tracking)
 router.post('/', CustomerCreditsController.createCredit);
 
 export default router;

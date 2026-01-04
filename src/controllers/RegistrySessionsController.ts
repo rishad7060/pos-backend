@@ -2,64 +2,20 @@ import { Response } from 'express';
 import { prisma } from '../models/db';
 import { AuthRequest } from '../middleware/auth';
 import { decimalToNumber } from '../utils/decimal';
+import { parseLimit } from '../config/pagination';
 
 export class RegistrySessionsController {
   /**
-   * Clean up old open registry sessions (force close with zero variance if needed)
+   * DISABLED: Auto-cleanup has been removed
+   * Registry sessions now stay open until manually closed
+   * This endpoint is kept for backward compatibility but does nothing
    */
   static async cleanupOldSessions(req: AuthRequest, res: Response) {
-    try {
-      // Find sessions that are more than 24 hours old and still open
-      const oneDayAgo = new Date();
-      oneDayAgo.setDate(oneDayAgo.getDate() - 1);
-
-      const oldOpenSessions = await prisma.registrySession.findMany({
-        where: {
-          status: 'open',
-          openedAt: {
-            lt: oneDayAgo,
-          },
-        },
-      });
-
-      let cleanedCount = 0;
-      for (const session of oldOpenSessions) {
-        // Force close with zero variance (assume cash was properly counted)
-        const today = new Date(session.sessionDate);
-        today.setHours(0, 0, 0, 0);
-        const tomorrow = new Date(today);
-        tomorrow.setDate(tomorrow.getDate() + 1);
-
-        // Update stats first
-        await RegistrySessionsController.updateSessionStats(session.id, today, tomorrow);
-
-        // Force close with zero variance
-        await prisma.registrySession.update({
-          where: { id: session.id },
-          data: {
-            status: 'closed',
-            closedBy: session.openedBy, // Closed by the same person who opened
-            actualCash: 0, // Assume zero for cleanup
-            variance: 0, // No variance for cleanup
-            closingNotes: 'Auto-closed due to no activity (cleanup)',
-            closedAt: new Date(),
-          },
-        });
-
-        cleanedCount++;
-      }
-
-      return res.json({
-        message: `Cleaned up ${cleanedCount} old open registry sessions`,
-        cleanedCount,
-      });
-    } catch (error) {
-      console.error('Error cleaning up old sessions:', error);
-      return res.status(500).json({
-        error: 'Failed to cleanup old sessions',
-        code: 'CLEANUP_ERROR',
-      });
-    }
+    return res.json({
+      message: 'Auto-cleanup is disabled. Registry sessions must be closed manually.',
+      cleanedCount: 0,
+      note: 'Registry sessions stay open until a user explicitly closes them.'
+    });
   }
 
   /**
@@ -67,10 +23,10 @@ export class RegistrySessionsController {
    */
   static async getSessions(req: AuthRequest, res: Response) {
     try {
-      const { limit = 50 } = req.query;
+      const { limit } = req.query;
 
       const sessions = await prisma.registrySession.findMany({
-        take: Math.min(parseInt(limit as string), 100),
+        take: parseLimit(limit, 'orders'),
         orderBy: {
           createdAt: 'desc',
         },
@@ -98,6 +54,7 @@ export class RegistrySessionsController {
         sessionNumber: session.sessionNumber,
         sessionDate: session.sessionDate.toISOString().split('T')[0],
         status: session.status,
+        closeType: session.closeType || 'manual', // How session was closed
         openingCash: decimalToNumber(session.openingCash),
         closingCash: decimalToNumber(session.closingCash),
         actualCash: decimalToNumber(session.actualCash),
@@ -131,48 +88,16 @@ export class RegistrySessionsController {
   }
 
   /**
-   * Get current open session for today (one session per day, shared by all cashiers)
+   * Get current open session (shared by all cashiers)
+   * NO AUTO-CLOSE: Registry stays open until manually closed
    */
   static async getCurrentSession(req: AuthRequest, res: Response) {
     try {
-      // Get today's date string (YYYY-MM-DD)
-      const todayStr = new Date().toISOString().split('T')[0];
-      console.log('[Registry] Checking for current session. Today:', todayStr);
+      console.log('[Registry] Checking for current open session');
 
-      // AUTO CLEANUP: Close sessions that are more than 24 hours old
-      const oneDayAgo = new Date();
-      oneDayAgo.setDate(oneDayAgo.getDate() - 1);
-
-      const oldSessions = await prisma.registrySession.findMany({
-        where: {
-          status: 'open',
-          openedAt: {
-            lt: oneDayAgo,
-          },
-        },
-      });
-
-      if (oldSessions.length > 0) {
-        console.log(`[Registry] Found ${oldSessions.length} old open sessions, auto-closing...`);
-        for (const oldSession of oldSessions) {
-          // Force close old sessions with zero variance
-          await prisma.registrySession.update({
-            where: { id: oldSession.id },
-            data: {
-              status: 'closed',
-              closedBy: oldSession.openedBy, // Closed by opener
-              actualCash: 0,
-              variance: 0,
-              closingNotes: 'Auto-closed due to age (24+ hours)',
-              closedAt: new Date(),
-            },
-          });
-          console.log(`[Registry] Auto-closed session ${oldSession.sessionNumber}`);
-        }
-      }
-
-      // Find all open sessions (after cleanup)
-      const openSessions = await prisma.registrySession.findMany({
+      // Find the most recent open session (if any)
+      // NO AUTO-CLOSE - session stays open until manually closed
+      const session = await prisma.registrySession.findFirst({
         where: {
           status: 'open',
         },
@@ -190,58 +115,7 @@ export class RegistrySessionsController {
         },
       });
 
-      console.log(`[Registry] Found ${openSessions.length} open session(s)`);
-
-      // Find session for today by comparing date strings
-      let session = openSessions.find((s) => {
-        const sessionDateStr = s.sessionDate.toISOString().split('T')[0];
-        const isToday = sessionDateStr === todayStr;
-        console.log(`[Registry] Session ${s.sessionNumber}: date=${sessionDateStr}, isToday=${isToday}`);
-        return isToday;
-      });
-
-      // If no session found for today, try to find the most recent open session (might be from today but timezone issue)
-      if (!session && openSessions.length > 0) {
-        const mostRecentSession = openSessions[0];
-        const sessionDateStr = mostRecentSession.sessionDate.toISOString().split('T')[0];
-        console.log(`[Registry] No exact match for today. Most recent session: ${mostRecentSession.sessionNumber}, date: ${sessionDateStr}`);
-
-        // If the most recent session was opened today (check openedAt), use it
-        const openedToday = mostRecentSession.openedAt.toISOString().split('T')[0] === todayStr;
-        if (openedToday) {
-          console.log(`[Registry] Using most recent session opened today: ${mostRecentSession.sessionNumber}`);
-          session = mostRecentSession;
-        }
-      }
-
-      // Auto-close old open sessions that aren't from today (in background, don't block)
-      // Only close sessions that are definitely not from today and not the current session
-      for (const oldSession of openSessions) {
-        const sessionDateStr = oldSession.sessionDate.toISOString().split('T')[0];
-        const openedToday = oldSession.openedAt.toISOString().split('T')[0] === todayStr;
-
-        // Only close if definitely not from today AND not the session we're using
-        if (sessionDateStr !== todayStr && !openedToday && (!session || oldSession.id !== session.id)) {
-          console.log(`[Registry] Auto-closing old session: ${oldSession.sessionNumber} (date: ${sessionDateStr})`);
-          // Auto-close old session in background (don't await)
-          prisma.registrySession.update({
-            where: { id: oldSession.id },
-            data: {
-              status: 'closed',
-              closingNotes: 'Auto-closed: Session date is not today',
-            },
-          }).catch((err) => {
-            console.error('Error auto-closing old session:', err);
-          });
-        }
-      }
-
-      // If no session found yet, use the most recent open session (regardless of date)
-      // This handles edge cases where date comparison might fail or registry stays open across days
-      if (!session && openSessions.length > 0) {
-        session = openSessions[0];
-        console.log(`[Registry] Using most recent open session as fallback: ${session.sessionNumber}`);
-      }
+      console.log(`[Registry] Found ${session ? 1 : 0} open session(s)`)
 
       if (!session) {
         console.log('[Registry] No open session found');
@@ -265,6 +139,7 @@ export class RegistrySessionsController {
         sessionNumber: updatedSession.sessionNumber,
         sessionDate: updatedSession.sessionDate.toISOString().split('T')[0],
         status: updatedSession.status,
+        closeType: updatedSession.closeType || 'manual',
         openingCash: decimalToNumber(updatedSession.openingCash),
         closingCash: decimalToNumber(updatedSession.closingCash),
         actualCash: decimalToNumber(updatedSession.actualCash),
@@ -297,7 +172,8 @@ export class RegistrySessionsController {
   }
 
   /**
-   * Create a new registry session (only if no open session exists for today)
+   * Create a new registry session (only if no open session exists)
+   * NO AUTO-CLOSE: Sessions stay open until manually closed
    */
   static async createSession(req: AuthRequest, res: Response) {
     try {
@@ -310,14 +186,12 @@ export class RegistrySessionsController {
         });
       }
 
-      // Get today's date string (YYYY-MM-DD)
-      const todayStr = new Date().toISOString().split('T')[0];
       const today = new Date();
       today.setHours(0, 0, 0, 0);
 
-      // Check if there's already an open session for today
-      // Use the same logic as getCurrentSession for consistency
-      const openSessions = await prisma.registrySession.findMany({
+      // Check if there's already ANY open session
+      // NO AUTO-CLOSE: Only one registry can be open at a time
+      const existingSession = await prisma.registrySession.findFirst({
         where: {
           status: 'open',
         },
@@ -326,15 +200,9 @@ export class RegistrySessionsController {
         },
       });
 
-      // Filter to find session for today by comparing date strings
-      const existingSession = openSessions.find((s) => {
-        const sessionDateStr = s.sessionDate.toISOString().split('T')[0];
-        return sessionDateStr === todayStr;
-      });
-
       if (existingSession) {
         return res.status(409).json({
-          error: 'A registry session is already open for today',
+          error: 'A registry session is already open. Please close it before opening a new one.',
           code: 'REGISTRY_ALREADY_OPEN',
           session: {
             id: existingSession.id,
@@ -400,6 +268,7 @@ export class RegistrySessionsController {
         sessionNumber: session.sessionNumber,
         sessionDate: session.sessionDate.toISOString().split('T')[0],
         status: session.status,
+        closeType: session.closeType || 'manual',
         openingCash: decimalToNumber(session.openingCash),
         closingCash: decimalToNumber(session.closingCash),
         actualCash: decimalToNumber(session.actualCash),
@@ -498,6 +367,43 @@ export class RegistrySessionsController {
 
       // If closing the session, validate required data first
       if (status === 'closed' || (closedBy && session.status === 'open')) {
+        // CRITICAL: Check for pending refunds before allowing registry close
+        const pendingRefunds = await prisma.refund.findMany({
+          where: {
+            registrySessionId: sessionId,
+            status: 'pending',
+          },
+          select: {
+            id: true,
+            refundNumber: true,
+            totalAmount: true,
+            cashHandedToCustomer: true,
+            reason: true,
+          },
+        });
+
+        if (pendingRefunds.length > 0) {
+          const refundsList = pendingRefunds.map(r => ({
+            refundNumber: r.refundNumber,
+            amount: decimalToNumber(r.totalAmount),
+            cashGiven: r.cashHandedToCustomer,
+            reason: r.reason,
+          }));
+
+          const totalPendingAmount = pendingRefunds.reduce((sum, r) => sum + (decimalToNumber(r.totalAmount) ?? 0), 0);
+          const cashGivenCount = pendingRefunds.filter(r => r.cashHandedToCustomer).length;
+
+          return res.status(400).json({
+            error: `Cannot close registry: ${pendingRefunds.length} refund(s) pending admin approval.`,
+            code: 'PENDING_REFUNDS_EXIST',
+            pendingRefunds: refundsList,
+            totalPendingAmount: Number(totalPendingAmount.toFixed(2)),
+            cashAlreadyGiven: cashGivenCount,
+            message: `You have ${pendingRefunds.length} refund(s) awaiting admin approval (Total: $${totalPendingAmount.toFixed(2)}). ${cashGivenCount > 0 ? `Cash has been given for ${cashGivenCount} refund(s). ` : ''}Please have an admin approve or reject these refunds before closing the registry.`,
+            action: 'Please contact admin to approve/reject pending refunds before closing the registry.',
+          });
+        }
+
         // REQUIRE actual cash count for closing - this is mandatory
         if (actualCash === undefined || actualCash === null || actualCash === '') {
           return res.status(400).json({
@@ -535,6 +441,7 @@ export class RegistrySessionsController {
       if (closedBy && session.status === 'open') {
         updateData.closedBy = parseInt(closedBy);
         updateData.status = 'closed';
+        updateData.closeType = 'manual'; // Always manual close - no auto-close
         updateData.closedAt = new Date();
       }
 
@@ -585,6 +492,7 @@ export class RegistrySessionsController {
         sessionNumber: updatedSession.sessionNumber,
         sessionDate: updatedSession.sessionDate.toISOString().split('T')[0],
         status: updatedSession.status,
+        closeType: updatedSession.closeType || 'manual',
         openingCash: decimalToNumber(updatedSession.openingCash),
         closingCash: decimalToNumber(updatedSession.closingCash),
         actualCash: decimalToNumber(updatedSession.actualCash),
@@ -659,15 +567,28 @@ export class RegistrySessionsController {
       },
     });
 
-    // Get all completed refunds with cash refund method for the session date
+    // Get all CASH refunds for this specific registry session
+    // IMPORTANT: Only CASH refunds affect registry cash reconciliation
+    // Other payment methods (card, mobile, credit, cheque) do NOT affect cashier's cash drawer:
+    //   - Card/Mobile refunds: Processed through payment gateway
+    //   - Credit refunds: Reduce customer balance via CustomerCredit transaction
+    //   - Cheque refunds: Physical cheque returned or new cheque issued
+    //
+    // Count cash refunds where:
+    //   1. Status is 'completed' (approved), OR
+    //   2. Status is 'pending' BUT cash was already handed to customer
+    // This ensures accurate cash reconciliation even with pending refunds
     const refunds = await prisma.refund.findMany({
       where: {
-        status: 'completed',
-        refundMethod: 'cash',
-        createdAt: {
-          gte: startDate,
-          lt: endDate,
-        },
+        registrySessionId: sessionId,
+        refundMethod: 'cash', // ONLY cash refunds
+        OR: [
+          { status: 'completed' }, // Approved refunds
+          {
+            status: 'pending',
+            cashHandedToCustomer: true, // Pending but cash already given
+          },
+        ],
       },
     });
 

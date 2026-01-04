@@ -12,5 +12,8 @@ router.use(requireAdmin);
 // GET /api/reports/profit-analysis - Get profit analysis
 router.get('/profit-analysis', ReportsController.getProfitAnalysis);
 
+// GET /api/reports/profit-loss - Get comprehensive Profit & Loss statement
+router.get('/profit-loss', ReportsController.getProfitLossStatement);
+
 export default router;
 

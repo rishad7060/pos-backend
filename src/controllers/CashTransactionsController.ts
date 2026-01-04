@@ -3,11 +3,12 @@ import { prisma } from '../models/db';
 import { AuthRequest } from '../middleware/auth';
 import { decimalToNumber } from '../utils/decimal';
 import { RegistrySessionsController } from './RegistrySessionsController';
+import { parseLimit } from '../config/pagination';
 
 export class CashTransactionsController {
   static async getTransactions(req: AuthRequest, res: Response) {
     try {
-      const { registrySessionId, transactionType, startDate, limit = 100 } = req.query;
+      const { registrySessionId, transactionType, startDate, limit } = req.query;
 
       const where: any = {};
 
@@ -31,7 +32,7 @@ export class CashTransactionsController {
         };
       }
 
-      const take = Math.min(parseInt(limit as string) || 100, 1000);
+      const take = Math.min(parseLimit(limit, 'orders'), 1000);
 
       const transactions = await prisma.cashTransaction.findMany({
         where,

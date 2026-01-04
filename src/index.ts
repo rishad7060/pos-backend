@@ -39,6 +39,7 @@ import expenseCategoriesRoutes from './routes/expense-categories';
 import purchasesRoutes from './routes/purchases';
 import purchasePaymentsRoutes from './routes/purchase-payments';
 import purchaseReceivesRoutes from './routes/purchase-receives';
+import purchaseReturnsRoutes from './routes/purchase-returns';
 import reportsRoutes from './routes/reports';
 import priceHistoryRoutes from './routes/price-history';
 import auditLogsRoutes from './routes/audit-logs';
@@ -60,6 +61,8 @@ import paymentDetailsRoutes from './routes/payment-details';
 import settingsRoutes from './routes/settings';
 import stockMovementsRoutes from './routes/stock-movements';
 import chequesRoutes from './routes/cheques';
+import batchesRoutes from './routes/batches';
+import backupRoutes from './routes/backup';
 
 app.use('/api/auth', authRoutes);
 app.use('/api/orders', ordersRoutes);
@@ -74,6 +77,7 @@ app.use('/api/expense-categories', expenseCategoriesRoutes);
 app.use('/api/purchases', purchasesRoutes);
 app.use('/api/purchase-payments', purchasePaymentsRoutes);
 app.use('/api/purchase-receives', purchaseReceivesRoutes);
+app.use('/api/purchase-returns', purchaseReturnsRoutes);
 app.use('/api/reports', reportsRoutes);
 app.use('/api/price-history', priceHistoryRoutes);
 app.use('/api/audit-logs', auditLogsRoutes);
@@ -95,6 +99,8 @@ app.use('/api/payment-details', paymentDetailsRoutes);
 app.use('/api/settings', settingsRoutes);
 app.use('/api/stock-movements', stockMovementsRoutes);
 app.use('/api/cheques', chequesRoutes);
+app.use('/api/batches', batchesRoutes);
+app.use('/api/backup', backupRoutes);
 
 // 404 handler
 app.use('*', (req, res) => {

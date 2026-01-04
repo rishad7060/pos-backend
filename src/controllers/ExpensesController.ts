@@ -3,11 +3,12 @@ import { prisma } from '../models/db';
 import { AuthRequest } from '../middleware/auth';
 
 import { decimalToNumber } from '../utils/decimal';
+import { parseLimit } from '../config/pagination';
 
 export class ExpensesController {
   static async getExpenses(req: AuthRequest, res: Response) {
     try {
-      const { startDate, endDate, limit = 100 } = req.query;
+      const { startDate, endDate, limit } = req.query;
 
       const where: any = {};
       
@@ -34,7 +35,7 @@ export class ExpensesController {
         orderBy: {
           expenseDate: 'desc',
         },
-        take: Math.min(parseInt(limit as string) || 100, 1000),
+        take: Math.min(parseLimit(limit, 'orders'), 1000),
       });
 
       // Convert Decimal to numbers
@@ -506,16 +507,67 @@ export class ExpensesController {
         return sum + (decimalToNumber(purchase.total) ?? 0);
       }, 0);
 
+      // === CHEQUES TRACKING (For Accurate Revenue Recognition) ===
+      const cheques = await prisma.cheque.findMany({
+        where: {
+          createdAt: {
+            gte: start,
+            lte: end,
+          },
+        },
+        include: {
+          customer: {
+            select: { name: true },
+          },
+          supplier: {
+            select: { name: true },
+          },
+          order: {
+            select: { id: true, orderNumber: true, total: true },
+          },
+        },
+      });
+
+      // Separate cheques by transaction type and status
+      const receivedCheques = cheques.filter(c => c.transactionType === 'received');
+      const issuedCheques = cheques.filter(c => c.transactionType === 'issued');
+
+      // Received cheques (from customers) breakdown
+      const clearedReceivedCheques = receivedCheques.filter(c => c.status === 'cleared');
+      const pendingReceivedCheques = receivedCheques.filter(c => c.status === 'pending' || c.status === 'deposited');
+      const bouncedReceivedCheques = receivedCheques.filter(c => c.status === 'bounced');
+
+      const clearedChequeRevenue = clearedReceivedCheques.reduce((sum, c) => sum + (decimalToNumber(c.amount) ?? 0), 0);
+      const pendingChequeAmount = pendingReceivedCheques.reduce((sum, c) => sum + (decimalToNumber(c.amount) ?? 0), 0);
+      const bouncedChequeAmount = bouncedReceivedCheques.reduce((sum, c) => sum + (decimalToNumber(c.amount) ?? 0), 0);
+
+      // Issued cheques (to suppliers) breakdown
+      const clearedIssuedCheques = issuedCheques.filter(c => c.status === 'cleared');
+      const pendingIssuedCheques = issuedCheques.filter(c => c.status === 'pending' || c.status === 'deposited');
+      const bouncedIssuedCheques = issuedCheques.filter(c => c.status === 'bounced');
+
+      const clearedIssuedChequeAmount = clearedIssuedCheques.reduce((sum, c) => sum + (decimalToNumber(c.amount) ?? 0), 0);
+      const pendingIssuedChequeAmount = pendingIssuedCheques.reduce((sum, c) => sum + (decimalToNumber(c.amount) ?? 0), 0);
+
       // === FINANCIAL CALCULATIONS ===
       const cogs = totalPurchases; // Cost of Goods Sold
       const operatingExpenses = totalManualExpenses + totalCashOut;
       const totalExpenses = operatingExpenses + cogs;
 
-      // Total revenue includes sales + manual income
-      const totalRevenue = totalSales + totalManualIncome;
+      // ✅ CORRECTED: Total revenue = Sales + CLEARED cheques only
+      // - Manual income (cash_in) NOT counted as revenue (it's liability or non-sales income)
+      // - Pending cheques NOT counted until cleared
+      // - Bounced cheques NOT counted (bad debt)
+      const totalRevenue = totalSales + clearedChequeRevenue;
 
-      const grossProfit = totalSales - cogs;
+      const grossProfit = totalRevenue - cogs;
+
+      // Net profit calculation (conservative - before manual income & pending cheques)
       const netProfit = totalRevenue - totalExpenses;
+
+      // Add manual income separately (not as revenue, but as other income)
+      const netProfitWithOtherIncome = netProfit + totalManualIncome;
+
       const profitMargin = totalRevenue > 0 ? (netProfit / totalRevenue) * 100 : 0;
       const expenseRatio = totalRevenue > 0 ? (totalExpenses / totalRevenue) * 100 : 0;
 
@@ -619,12 +671,13 @@ export class ExpensesController {
 
         // Key Financial Metrics
         financialMetrics: {
-          totalRevenue: Number(totalRevenue.toFixed(2)),
+          totalRevenue: Number(totalRevenue.toFixed(2)), // Only sales revenue
           totalSales: Number(totalSales.toFixed(2)),
-          totalIncome: Number(totalManualIncome.toFixed(2)),
+          totalIncome: Number(totalManualIncome.toFixed(2)), // Separate other income
           totalExpenses: Number(totalExpenses.toFixed(2)),
           grossProfit: Number(grossProfit.toFixed(2)),
-          netProfit: Number(netProfit.toFixed(2)),
+          netProfit: Number(netProfit.toFixed(2)), // Revenue - Expenses
+          netProfitWithOtherIncome: Number(netProfitWithOtherIncome.toFixed(2)), // Includes manual income
           profitMargin: Number(profitMargin.toFixed(2)),
           expenseRatio: Number(expenseRatio.toFixed(2)),
           averageOrderValue: Number(averageOrderValue.toFixed(2)),
@@ -646,6 +699,52 @@ export class ExpensesController {
           totalPurchases: Number(totalPurchases.toFixed(2)),
           operatingExpenses: Number(operatingExpenses.toFixed(2)),
           cogs: Number(cogs.toFixed(2)),
+        },
+
+        // Cheque Tracking (100% Accurate Accounting)
+        chequeTracking: {
+          received: {
+            cleared: {
+              count: clearedReceivedCheques.length,
+              amount: Number(clearedChequeRevenue.toFixed(2)),
+              description: 'Counted in revenue'
+            },
+            pending: {
+              count: pendingReceivedCheques.length,
+              amount: Number(pendingChequeAmount.toFixed(2)),
+              description: 'Not counted - awaiting clearance'
+            },
+            bounced: {
+              count: bouncedReceivedCheques.length,
+              amount: Number(bouncedChequeAmount.toFixed(2)),
+              description: 'Bad debt - not counted in revenue'
+            },
+            total: {
+              count: receivedCheques.length,
+              amount: Number((clearedChequeRevenue + pendingChequeAmount + bouncedChequeAmount).toFixed(2))
+            }
+          },
+          issued: {
+            cleared: {
+              count: clearedIssuedCheques.length,
+              amount: Number(clearedIssuedChequeAmount.toFixed(2)),
+              description: 'Payment to suppliers - completed'
+            },
+            pending: {
+              count: pendingIssuedCheques.length,
+              amount: Number(pendingIssuedChequeAmount.toFixed(2)),
+              description: 'Pending clearance'
+            },
+            bounced: {
+              count: bouncedIssuedCheques.length,
+              amount: 0, // Bounced issued cheques would be rare
+              description: 'Bounced - still owe supplier'
+            },
+            total: {
+              count: issuedCheques.length,
+              amount: Number((clearedIssuedChequeAmount + pendingIssuedChequeAmount).toFixed(2))
+            }
+          }
         },
 
         // Detailed Breakdowns

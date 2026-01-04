@@ -170,12 +170,17 @@ export class DashboardController {
         },
       });
 
-      // Calculate profit (simplified - would need cost prices)
-      const estimatedProfit = totalRevenue * 0.3; // 30% margin estimate
-      const profitMargin = totalRevenue > 0 ? (estimatedProfit / totalRevenue) * 100 : 0;
+      // Calculate ACTUAL profit using cost prices from order items
+      const actualCOGS = orders.reduce((sum, order) => {
+        return sum + order.orderItems.reduce((itemSum, item) => {
+          const costPrice = decimalToNumber(item.costPrice) ?? 0;
+          const quantity = decimalToNumber(item.netWeightKg) ?? 0;
+          return itemSum + (costPrice * quantity);
+        }, 0);
+      }, 0);
 
-      // Ensure all values are numbers (not Decimal objects)
-      const estimatedCost = totalRevenue - estimatedProfit;
+      const actualProfit = totalRevenue - actualCOGS;
+      const profitMargin = totalRevenue > 0 ? (actualProfit / totalRevenue) * 100 : 0;
       
       return res.json({
         period: period as string,
@@ -203,8 +208,8 @@ export class DashboardController {
         },
         profitAnalysis: {
           totalRevenue: Number(totalRevenue),
-          estimatedCost: Number(estimatedCost),
-          estimatedProfit: Number(estimatedProfit),
+          totalCOGS: Number(actualCOGS),
+          grossProfit: Number(actualProfit),
           profitMargin: Number(profitMargin),
         },
       });

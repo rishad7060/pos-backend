@@ -1,6 +1,7 @@
 import { Response } from 'express';
 import { prisma } from '../models/db';
 import { AuthRequest } from '../middleware/auth';
+import { parseLimit } from '../config/pagination';
 
 export class AuditLogsController {
   static async getAuditLogs(req: AuthRequest, res: Response) {
@@ -12,7 +13,7 @@ export class AuditLogsController {
         entityId,
         startDate,
         endDate,
-        limit = 100,
+        limit,
         offset = 0,
       } = req.query;
 
@@ -61,7 +62,7 @@ export class AuditLogsController {
         orderBy: {
           createdAt: 'desc',
         },
-        take: Math.min(parseInt(limit as string) || 100, 1000),
+        take: Math.min(parseLimit(limit, 'orders'), 1000),
         skip: parseInt(offset as string) || 0,
       });
 

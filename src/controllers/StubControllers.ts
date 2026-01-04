@@ -4,11 +4,12 @@ import { AuthRequest } from '../middleware/auth';
 import { prisma } from '../models/db';
 import bcrypt from 'bcrypt';
 import { decimalToNumber } from '../utils/decimal';
+import { parseLimit } from '../config/pagination';
 
 export class UserSessionsController {
   static async getUserSessions(req: AuthRequest, res: Response) {
     try {
-      const { limit = 100, userId, startDate, endDate, status = 'all' } = req.query;
+      const { limit, userId, startDate, endDate, status = 'all' } = req.query;
 
       const where: any = {};
 
@@ -38,7 +39,7 @@ export class UserSessionsController {
         where.logoutTime = { not: null };
       }
 
-      const take = Math.min(parseInt(limit as string) || 100, 1000);
+      const take = Math.min(parseLimit(limit, 'orders'), 1000);
 
       try {
         const sessions = await prisma.userSession.findMany({
@@ -250,7 +251,7 @@ export class UserSessionsController {
 export class ShiftsController {
   static async getShifts(req: AuthRequest, res: Response) {
     try {
-      const { limit = 100, cashierId, branchId, status } = req.query;
+      const { limit, cashierId, branchId, status } = req.query;
 
       const where: any = {};
 
@@ -272,7 +273,7 @@ export class ShiftsController {
         where.status = status;
       }
 
-      const take = Math.min(parseInt(limit as string) || 100, 1000);
+      const take = Math.min(parseLimit(limit, 'orders'), 1000);
 
       const shifts = await prisma.cashierShift.findMany({
         where,
@@ -417,7 +418,7 @@ export class BranchesController {
         where.isActive = isActive === 'true';
       }
 
-      const take = Math.min(parseInt(limit as string) || 10, 100);
+      const take = Math.min(parseLimit(limit, 'orders'), 100);
 
       const branches = await prisma.branch.findMany({
         where,
@@ -1169,7 +1170,7 @@ export class ManagerPermissionsController {
 export class CashierPermissionsController {
   static async getPermissions(req: AuthRequest, res: Response) {
     try {
-      const { cashierId, limit = 100 } = req.query;
+      const { cashierId, limit } = req.query;
 
       if (cashierId) {
         // Get permissions for specific cashier
@@ -1203,7 +1204,7 @@ export class CashierPermissionsController {
 
       // Get all permissions
       const permissions = await prisma.cashierPermission.findMany({
-        take: Math.min(parseInt(limit as string), 1000),
+        take: parseLimit(limit, 'orders'),
         include: {
           cashier: {
             select: { id: true, fullName: true, email: true },

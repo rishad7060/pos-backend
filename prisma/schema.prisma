@@ -32,6 +32,7 @@ model User {
   refunds                   Refund[]
   purchasePayments          PurchasePayment[]
   purchaseReceives          PurchaseReceive[]
+  purchaseReturns           PurchaseReturn[]
   purchases                 Purchase[]
   expenses                  Expense[]
   auditLogs                 AuditLog[]
@@ -80,11 +81,13 @@ model Product {
   updatedAt         DateTime  @updatedAt
 
   // Relations
-  orderItems         OrderItem[]
-  stockMovements     StockMovement[]
-  purchaseItems      PurchaseItem[]
-  priceChangeHistory PriceChangeHistory[]
-  refundItems        RefundItem[]
+  orderItems          OrderItem[]
+  stockMovements      StockMovement[]
+  purchaseItems       PurchaseItem[]
+  purchaseReturnItems PurchaseReturnItem[]
+  priceChangeHistory  PriceChangeHistory[]
+  refundItems         RefundItem[]
+  stockBatches        StockBatch[]
 
   @@map("products")
 }
@@ -98,6 +101,7 @@ model Customer {
   address        String?
   totalPurchases Decimal   @default(0)
   visitCount     Int       @default(0)
+  creditBalance  Decimal   @default(0) // Current credit balance (money customer has prepaid)
   deletedAt      DateTime? // Soft delete timestamp
   deletedBy      Int?      // User who deleted this record
   createdAt      DateTime  @default(now())
@@ -136,9 +140,14 @@ model Order {
   discountPercent   Decimal  @default(0)
   taxAmount         Decimal  @default(0)
   total             Decimal
-  paymentMethod     String   @default("cash") // 'cash', 'card', 'split'
+  paymentMethod     String   @default("cash") // 'cash', 'card', 'split', 'credit'
+
+  // Payment breakdown for accurate accounting
+  amountPaid        Decimal? // Actual cash/card paid by customer
+  creditUsed        Decimal  @default(0) // Credit balance used from customer account
   cashReceived      Decimal?
   changeGiven       Decimal?
+
   notes             String?
   status            String // 'completed' or 'voided'
   createdAt         DateTime @default(now())
@@ -184,9 +193,10 @@ model OrderItem {
   createdAt           DateTime @default(now())
 
   // Relations
-  order       Order        @relation(fields: [orderId], references: [id])
-  product     Product?     @relation(fields: [productId], references: [id])
-  refundItems RefundItem[]
+  order            Order            @relation(fields: [orderId], references: [id])
+  product          Product?         @relation(fields: [productId], references: [id])
+  refundItems      RefundItem[]
+  orderItemBatches OrderItemBatch[]
 
   @@map("order_items")
 }
@@ -421,8 +431,10 @@ model Supplier {
 
   // Relations
   purchases       Purchase[]
+  purchaseReturns PurchaseReturn[]
   supplierCredits SupplierCredit[]
   cheques         Cheque[]
+  stockBatches    StockBatch[]
 
   @@map("suppliers")
 }
@@ -456,7 +468,9 @@ model Purchase {
   purchaseItems    PurchaseItem[]
   purchasePayments PurchasePayment[]
   purchaseReceives PurchaseReceive[]
+  purchaseReturns  PurchaseReturn[]
   supplierCredits  SupplierCredit[]
+  stockBatches     StockBatch[]
 
   @@map("purchases")
 }
@@ -474,9 +488,10 @@ model PurchaseItem {
   createdAt        DateTime @default(now())
 
   // Relations
-  purchase         Purchase          @relation(fields: [purchaseId], references: [id])
-  product          Product?          @relation(fields: [productId], references: [id])
-  purchaseReceives PurchaseReceive[]
+  purchase            Purchase             @relation(fields: [purchaseId], references: [id])
+  product             Product?             @relation(fields: [productId], references: [id])
+  purchaseReceives    PurchaseReceive[]
+  purchaseReturnItems PurchaseReturnItem[]
 
   @@map("purchase_items")
 }
@@ -513,11 +528,103 @@ model PurchaseReceive {
   createdAt        DateTime @default(now())
 
   // Relations
-  purchase     Purchase     @relation(fields: [purchaseId], references: [id])
-  purchaseItem PurchaseItem @relation(fields: [purchaseItemId], references: [id])
-  user         User         @relation(fields: [userId], references: [id])
+  purchase     Purchase      @relation(fields: [purchaseId], references: [id])
+  purchaseItem PurchaseItem  @relation(fields: [purchaseItemId], references: [id])
+  user         User          @relation(fields: [userId], references: [id])
+  stockBatches StockBatch[]  // Link to stock batches created from this receive
 
   @@map("purchase_receives")
+}
+
+// Purchase returns table for tracking items returned to supplier
+model PurchaseReturn {
+  id            Int      @id @default(autoincrement())
+  returnNumber  String   @unique
+  purchaseId    Int
+  supplierId    Int
+  totalAmount   Decimal  // Total cost of returned items
+  returnDate    DateTime @default(now())
+  userId        Int      // User who processed the return
+  reason        String?  // Reason for return (damaged, wrong item, etc.)
+  notes         String?
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  // Relations
+  purchase           Purchase             @relation(fields: [purchaseId], references: [id])
+  supplier           Supplier             @relation(fields: [supplierId], references: [id])
+  user               User                 @relation(fields: [userId], references: [id])
+  purchaseReturnItems PurchaseReturnItem[]
+
+  @@map("purchase_returns")
+}
+
+// Purchase return items table for tracking individual items returned
+model PurchaseReturnItem {
+  id               Int      @id @default(autoincrement())
+  purchaseReturnId Int
+  purchaseItemId   Int
+  productId        Int?
+  productName      String
+  returnedQuantity Decimal
+  unitPrice        Decimal  // Price per unit at time of purchase
+  totalCost        Decimal  // returnedQuantity * unitPrice
+  createdAt        DateTime @default(now())
+
+  // Relations
+  purchaseReturn PurchaseReturn @relation(fields: [purchaseReturnId], references: [id])
+  purchaseItem   PurchaseItem   @relation(fields: [purchaseItemId], references: [id])
+  product        Product?       @relation(fields: [productId], references: [id])
+
+  @@map("purchase_return_items")
+}
+
+// Stock batches table for FIFO inventory costing
+model StockBatch {
+  id                 Int              @id @default(autoincrement())
+  productId          Int
+  purchaseId         Int?             // Link to purchase order
+  purchaseReceiveId  Int?             // Link to specific receive transaction
+  batchNumber        String           @unique // Auto-generated batch number
+  receivedDate       DateTime         @default(now())
+  quantityReceived   Decimal          // Original quantity received
+  quantityRemaining  Decimal          // Current quantity available
+  costPrice          Decimal          // Cost price for THIS batch
+  supplierId         Int?             // Track which supplier this batch came from
+  expiryDate         DateTime?        // Optional expiry tracking
+  notes              String?
+  createdAt          DateTime         @default(now())
+  updatedAt          DateTime         @updatedAt
+
+  // Relations
+  product         Product           @relation(fields: [productId], references: [id])
+  purchase        Purchase?         @relation(fields: [purchaseId], references: [id])
+  purchaseReceive PurchaseReceive?  @relation(fields: [purchaseReceiveId], references: [id])
+  supplier        Supplier?         @relation(fields: [supplierId], references: [id])
+  orderItemBatches OrderItemBatch[]
+
+  @@map("stock_batches")
+  @@index([productId, quantityRemaining]) // Optimize FIFO queries
+  @@index([receivedDate]) // Optimize FIFO sorting
+}
+
+// Junction table linking order items to stock batches
+model OrderItemBatch {
+  id              Int      @id @default(autoincrement())
+  orderItemId     Int
+  stockBatchId    Int
+  quantityUsed    Decimal  // Quantity taken from this batch
+  costPrice       Decimal  // Cost price from this batch (denormalized for reporting)
+  batchNumber     String   // Denormalized for easy reference
+  createdAt       DateTime @default(now())
+
+  // Relations
+  orderItem  OrderItem  @relation(fields: [orderItemId], references: [id])
+  stockBatch StockBatch @relation(fields: [stockBatchId], references: [id])
+
+  @@map("order_item_batches")
+  @@index([orderItemId])
+  @@index([stockBatchId])
 }
 
 // Supplier credits table for tracking manual credits/debits and outstanding balances
@@ -530,14 +637,33 @@ model SupplierCredit {
   balance         Decimal  // Running balance after this transaction
   description     String?
   userId          Int?     // Admin/user who created this entry
+  paidAmount      Decimal  @default(0) // Amount paid off (for credit entries)
+  paymentStatus   String?  // 'unpaid', 'partial', 'paid' (for credit entries)
   createdAt       DateTime @default(now())
 
   // Relations
-  supplier Supplier  @relation(fields: [supplierId], references: [id])
-  purchase Purchase? @relation(fields: [purchaseId], references: [id])
-  user     User?     @relation(fields: [userId], references: [id])
+  supplier             Supplier                     @relation(fields: [supplierId], references: [id])
+  purchase             Purchase?                    @relation(fields: [purchaseId], references: [id])
+  user                 User?                        @relation(fields: [userId], references: [id])
+  paymentAllocations   SupplierPaymentAllocation[]  @relation("PaymentRecord") // Payments this was allocated from
+  allocationsReceived  SupplierPaymentAllocation[]  @relation("CreditBeingPaid") // Allocations to pay off this credit
 
   @@map("supplier_credits")
+}
+
+// Supplier payment allocation table - tracks how payments are allocated to credits/POs
+model SupplierPaymentAllocation {
+  id                  Int            @id @default(autoincrement())
+  paymentCreditId     Int            // The payment (debit) transaction
+  allocatedCreditId   Int            // The credit being paid off (admin_credit or PO credit)
+  allocatedAmount     Decimal        // Amount allocated from payment to this credit
+  createdAt           DateTime       @default(now())
+
+  // Relations
+  paymentCredit      SupplierCredit @relation("PaymentRecord", fields: [paymentCreditId], references: [id])
+  allocatedCredit    SupplierCredit @relation("CreditBeingPaid", fields: [allocatedCreditId], references: [id])
+
+  @@map("supplier_payment_allocations")
 }
 
 // Expense categories table
@@ -610,27 +736,40 @@ model CashierShift {
 
 // Refunds table
 model Refund {
-  id              Int      @id @default(autoincrement())
-  refundNumber    String   @unique
-  originalOrderId Int
-  cashierId       Int
-  customerId      Int?
-  refundType      String
-  reason          String
-  totalAmount     Decimal
-  refundMethod    String
-  status          String
-  approvedBy      Int?
-  notes           String?
-  createdAt       DateTime @default(now())
-  updatedAt       DateTime @updatedAt
+  id                    Int       @id @default(autoincrement())
+  refundNumber          String    @unique
+  originalOrderId       Int
+  cashierId             Int
+  customerId            Int?
+  registrySessionId     Int?      // Link to registry session where refund was created
+  refundType            String
+  reason                String
+  totalAmount           Decimal
+  refundMethod          String    // 'cash', 'card', 'mobile', 'credit', 'cheque'
+  status                String    // 'pending', 'completed', 'rejected'
+  approvedBy            Int?
+  cashHandedToCustomer  Boolean   @default(false) // Track if physical cash was given
+  cashHandedAt          DateTime? // When cash was physically handed to customer
+
+  // Cheque refund tracking
+  originalChequeId      Int?      // Original cheque being returned (full refund)
+  refundChequeId        Int?      // New cheque issued for refund (partial refund)
+
+  notes                 String?
+  createdAt             DateTime  @default(now())
+  updatedAt             DateTime  @updatedAt
 
   // Relations
-  originalOrder  Order        @relation(fields: [originalOrderId], references: [id])
-  cashier        User         @relation(fields: [cashierId], references: [id])
-  customer       Customer?    @relation(fields: [customerId], references: [id])
-  approvedByUser User?        @relation("RefundApprovedBy", fields: [approvedBy], references: [id])
-  refundItems    RefundItem[]
+  originalOrder   Order             @relation(fields: [originalOrderId], references: [id])
+  cashier         User              @relation(fields: [cashierId], references: [id])
+  customer        Customer?         @relation(fields: [customerId], references: [id])
+  approvedByUser  User?             @relation("RefundApprovedBy", fields: [approvedBy], references: [id])
+  registrySession RegistrySession?  @relation(fields: [registrySessionId], references: [id])
+  refundItems     RefundItem[]
+
+  // Cheque relations
+  originalCheque  Cheque?           @relation("OriginalChequeReturned", fields: [originalChequeId], references: [id])
+  refundCheque    Cheque?           @relation("RefundChequeIssued", fields: [refundChequeId], references: [id])
 
   @@map("refunds")
 }
@@ -774,6 +913,7 @@ model UserSession {
 }
 
 // Registry sessions table for cash drawer tracking
+// IMPORTANT: Registry sessions stay open until MANUALLY closed - NO AUTO-CLOSE
 model RegistrySession {
   id            Int       @id @default(autoincrement())
   openedBy      Int
@@ -782,6 +922,7 @@ model RegistrySession {
   sessionNumber String    @unique
   sessionDate   DateTime  @default(now()) // YYYY-MM-DD for daily tracking
   status        String // 'open' or 'closed'
+  closeType     String    @default("manual") // Always 'manual' - registry only closes when user explicitly closes it
   openingCash   Decimal
   closingCash   Decimal?
   actualCash    Decimal?
@@ -808,6 +949,7 @@ model RegistrySession {
   cashTransactions CashTransaction[]
   userSessions     UserSession[]
   orders           Order[]           // TEAM_003: Orders made during this session
+  refunds          Refund[]          // Refunds created during this session
 
   @@map("registry_sessions")
 }
@@ -895,6 +1037,10 @@ model Cheque {
   user            User?            @relation("ChequeRecordedBy", fields: [userId], references: [id])
   approver        User?            @relation("ChequeApprovedBy", fields: [approvedBy], references: [id])
   endorsedByUser  User?            @relation("ChequeEndorsedBy", fields: [endorsedById], references: [id])
+
+  // Refund relations
+  refundsReturned Refund[]         @relation("OriginalChequeReturned")  // Refunds that returned this cheque
+  refundsIssued   Refund[]         @relation("RefundChequeIssued")      // Refunds where this was issued as new cheque
 
   @@map("cheques")
 }

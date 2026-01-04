@@ -1,6 +1,7 @@
 import { Response } from 'express';
 import { prisma } from '../models/db';
 import { AuthRequest } from '../middleware/auth';
+import { parseLimit, createPaginatedResponse } from '../config/pagination';
 
 export class CategoriesController {
   static async getCategories(req: AuthRequest, res: Response) {
@@ -8,14 +9,26 @@ export class CategoriesController {
       const { limit } = req.query;
 
       // Try to get from Category model first, fallback to product categories
+      // POS needs ALL categories available
+      const take = parseLimit(limit, 'categories');
+
       try {
+        // Get total count
+        const totalCount = await prisma.category.count();
+
         const categories = await prisma.category.findMany({
-          take: limit ? Math.min(parseInt(limit as string), 1000) : 1000,
+          take,
           orderBy: { name: 'asc' },
         });
 
         if (categories.length > 0) {
-          return res.json(categories);
+          const response = createPaginatedResponse(
+            categories,
+            totalCount,
+            take,
+            'categories'
+          );
+          return res.json(response);
         }
       } catch (err) {
         // Category model might not be in use, fallback to product categories
@@ -29,7 +42,7 @@ export class CategoriesController {
         select: {
           category: true,
         },
-        take: limit ? Math.min(parseInt(limit as string), 1000) : 1000,
+        take,
       });
 
       const uniqueCategories = new Set<string>();
@@ -40,10 +53,17 @@ export class CategoriesController {
       });
 
       const categories = Array.from(uniqueCategories)
-        .slice(0, limit ? Math.min(parseInt(limit as string), 1000) : 100)
         .map((name, index) => ({ id: index + 1, name }));
 
-      return res.json(categories);
+      // For fallback, total = returned
+      const response = createPaginatedResponse(
+        categories,
+        categories.length,
+        take,
+        'categories'
+      );
+
+      return res.json(response);
     } catch (error) {
       console.error('Get categories error:', error);
       return res.status(500).json({

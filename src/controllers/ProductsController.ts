@@ -2,6 +2,8 @@ import { Response } from 'express';
 import { prisma } from '../models/db';
 import { AuthRequest } from '../middleware/auth';
 import { decimalToNumber } from '../utils/decimal';
+import { createStockBatch } from '../services/batchService';
+import { parseLimit, createPaginatedResponse } from '../config/pagination';
 
 export class ProductsController {
   static async getProducts(req: AuthRequest, res: Response) {
@@ -19,7 +21,11 @@ export class ProductsController {
         where.isActive = isActive === 'true';
       }
 
-      const take = limit ? Math.min(parseInt(limit as string), 1000) : 100;
+      // POS systems need access to ALL products - use generous limit
+      const take = parseLimit(limit, 'products');
+
+      // Get total count for pagination metadata
+      const totalCount = await prisma.product.count({ where });
 
       const products = await prisma.product.findMany({
         where,
@@ -37,7 +43,15 @@ export class ProductsController {
         stockQuantity: decimalToNumber(product.stockQuantity),
       }));
 
-      return res.json(serializedProducts);
+      // Return paginated response with metadata
+      const response = createPaginatedResponse(
+        serializedProducts,
+        totalCount,
+        take,
+        'products'
+      );
+
+      return res.json(response);
     } catch (error) {
       console.error('Get products error:', error);
       return res.status(500).json({
@@ -76,8 +90,18 @@ export class ProductsController {
       }
 
       // Validate stock quantity and reorder level based on unit type
-      const stockQty = parseFloat(stockQuantity);
+      const stockQty = parseFloat(stockQuantity || 0);
       const reorderLvl = parseFloat(reorderLevel || 0);
+      const cost = costPrice ? parseFloat(costPrice) : null;
+
+      // CRITICAL: If adding initial stock, cost price is REQUIRED
+      if (stockQty > 0 && (!cost || cost <= 0)) {
+        return res.status(400).json({
+          error: 'Cost price is required when adding initial stock',
+          code: 'COST_PRICE_REQUIRED',
+          message: 'You cannot add stock without specifying a valid cost price. This is required for accurate inventory costing and batch tracking.',
+        });
+      }
 
       if (unitType === 'unit') {
         // For units, must be whole numbers
@@ -114,33 +138,62 @@ export class ProductsController {
         });
       }
 
-      const product = await prisma.product.create({
-        data: {
-          name,
-          description: description || null,
-          defaultPricePerKg: defaultPricePerKg ? parseFloat(defaultPricePerKg) : null,
-          costPrice: costPrice ? parseFloat(costPrice) : null,
-          category: category || null,
-          sku: sku || null,
-          barcode: barcode || null,
-          stockQuantity: stockQuantity ? parseFloat(stockQuantity) : 0,
-          reorderLevel: reorderLevel ? parseFloat(reorderLevel) : 10,
-          unitType: unitType || 'weight',
-          isActive: isActive !== undefined ? isActive : true,
-          imageUrl: imageUrl || null,
-          alertsEnabled: alertsEnabled !== undefined ? alertsEnabled : true,
-          alertEmail: alertEmail || null,
-          minStockLevel: minStockLevel ? parseFloat(minStockLevel) : null,
-          maxStockLevel: maxStockLevel ? parseFloat(maxStockLevel) : null,
-        },
+      // Use transaction to ensure batch is created if initial stock provided
+      const product = await prisma.$transaction(async (tx) => {
+        // Create product first (without stock if initial stock provided - batch will set it)
+        const newProduct = await tx.product.create({
+          data: {
+            name,
+            description: description || null,
+            defaultPricePerKg: defaultPricePerKg ? parseFloat(defaultPricePerKg) : null,
+            costPrice: cost || 0, // Will be updated by batch creation if stock provided
+            category: category || null,
+            sku: sku || null,
+            barcode: barcode || null,
+            stockQuantity: 0, // Will be set by batch creation if stock provided
+            reorderLevel: reorderLevel ? parseFloat(reorderLevel) : 10,
+            unitType: unitType || 'weight',
+            isActive: isActive !== undefined ? isActive : true,
+            imageUrl: imageUrl || null,
+            alertsEnabled: alertsEnabled !== undefined ? alertsEnabled : true,
+            alertEmail: alertEmail || null,
+            minStockLevel: minStockLevel ? parseFloat(minStockLevel) : null,
+            maxStockLevel: maxStockLevel ? parseFloat(maxStockLevel) : null,
+          },
+        });
+
+        // If initial stock provided, create first batch
+        if (stockQty > 0 && cost && cost > 0) {
+          await createStockBatch(
+            newProduct.id,
+            stockQty,
+            cost,
+            {
+              notes: 'Initial stock from product creation',
+              receivedDate: new Date(),
+            },
+            tx
+          );
+          // createStockBatch automatically updates product cost price and stock quantity
+        }
+
+        return newProduct;
+      });
+
+      // Re-fetch product to get updated cost price and stock quantity from batch creation
+      const updatedProduct = await prisma.product.findUnique({
+        where: { id: product.id },
       });
 
       // Convert Decimal types to numbers
       const serializedProduct = {
-        ...product,
-        defaultPricePerKg: decimalToNumber(product.defaultPricePerKg),
-        costPrice: decimalToNumber(product.costPrice),
-        stockQuantity: decimalToNumber(product.stockQuantity),
+        ...updatedProduct,
+        defaultPricePerKg: decimalToNumber(updatedProduct!.defaultPricePerKg),
+        costPrice: decimalToNumber(updatedProduct!.costPrice),
+        stockQuantity: decimalToNumber(updatedProduct!.stockQuantity),
+        reorderLevel: decimalToNumber(updatedProduct!.reorderLevel),
+        minStockLevel: decimalToNumber(updatedProduct!.minStockLevel),
+        maxStockLevel: decimalToNumber(updatedProduct!.maxStockLevel),
       };
 
       return res.status(201).json(serializedProduct);
@@ -582,6 +635,64 @@ export class ProductsController {
       });
     } catch (error: any) {
       console.error('Restore product error:', error);
+      return res.status(500).json({
+        error: 'Internal server error',
+        code: 'INTERNAL_ERROR',
+      });
+    }
+  }
+
+  static async getProductStats(req: AuthRequest, res: Response) {
+    try {
+      // Get total products count (active only)
+      const totalProducts = await prisma.product.count({
+        where: {
+          isActive: true,
+          deletedAt: null,
+        },
+      });
+
+      // Get products grouped by stock status
+      const allProducts = await prisma.product.findMany({
+        where: {
+          isActive: true,
+          deletedAt: null,
+        },
+        select: {
+          stockQuantity: true,
+          reorderLevel: true,
+          costPrice: true,
+        },
+      });
+
+      let lowStockCount = 0;
+      let outOfStockCount = 0;
+      let totalValue = 0;
+
+      for (const product of allProducts) {
+        const stock = decimalToNumber(product.stockQuantity) || 0;
+        const reorder = decimalToNumber(product.reorderLevel) || 0;
+        const cost = decimalToNumber(product.costPrice) || 0;
+
+        // Calculate inventory value
+        totalValue += stock * cost;
+
+        // Count stock status
+        if (stock === 0) {
+          outOfStockCount++;
+        } else if (stock <= reorder && stock > 0) {
+          lowStockCount++;
+        }
+      }
+
+      return res.json({
+        totalProducts,
+        totalValue: Number(totalValue.toFixed(2)),
+        lowStockCount,
+        outOfStockCount,
+      });
+    } catch (error: any) {
+      console.error('Get product stats error:', error);
       return res.status(500).json({
         error: 'Internal server error',
         code: 'INTERNAL_ERROR',

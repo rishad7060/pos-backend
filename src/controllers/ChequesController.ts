@@ -2,6 +2,7 @@ import { Response } from 'express';
 import { prisma } from '../models/db';
 import { AuthRequest } from '../middleware/auth';
 import { decimalToNumber } from '../utils/decimal';
+import { parseLimit, getPaginationParams } from '../config/pagination';
 
 export class ChequesController {
   /**
@@ -16,10 +17,10 @@ export class ChequesController {
         supplierId,
         startDate,
         endDate,
-        limit = 100
+        limit
       } = req.query;
 
-      const take = Math.min(parseInt(limit as string) || 100, 1000);
+      const take = Math.min(parseLimit(limit, 'cheques'), 1000);
 
       // Build where clause
       const where: any = {};

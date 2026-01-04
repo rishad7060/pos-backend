@@ -2,6 +2,7 @@ import { Response } from 'express';
 import { prisma } from '../models/db';
 import { AuthRequest } from '../middleware/auth';
 import { decimalToNumber } from '../utils/decimal';
+import { parseLimit } from '../config/pagination';
 
 export class SuppliersController {
   static async getSuppliers(req: AuthRequest, res: Response) {
@@ -28,56 +29,21 @@ export class SuppliersController {
         orderBy: {
           createdAt: 'desc',
         },
-        take: limit ? Math.min(parseInt(limit as string), 1000) : 100,
-        include: {
-          purchases: {
-            include: {
-              purchasePayments: true,
-            },
-          },
-          supplierCredits: true,
-        },
+        take: limit ? parseLimit(limit, 'orders') : 100,
+        // No need to include purchases or credits - we use the cached fields
       });
 
-      // Calculate totals dynamically
+      // Serialize suppliers with proper decimal conversion
       const serialized = suppliers.map(supplier => {
-        // Calculate total purchases (sum of all purchase totals)
-        const totalPurchases = supplier.purchases.reduce((sum, purchase) => {
-          const total = decimalToNumber(purchase.total);
-          return sum + (total ?? 0);
-        }, 0);
-
-        // Calculate outstanding balance (total purchases - total payments)
-        const totalPaid = supplier.purchases.reduce((sum, purchase) => {
-          const paid = purchase.purchasePayments.reduce((paymentSum, payment) => {
-            const amount = decimalToNumber(payment.amount);
-            return paymentSum + (amount ?? 0);
-          }, 0);
-          return sum + paid;
-        }, 0);
-
-        // Get the latest credit balance (which includes all manual credits/debits)
-        const latestCredit = supplier.supplierCredits.length > 0
-          ? supplier.supplierCredits.sort((a, b) =>
-              new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()
-            )[0]
-          : null;
-
-        // Outstanding balance = (purchases - payments) + manual credits balance
-        const manualCreditsBalance = latestCredit
-          ? (decimalToNumber(latestCredit.balance) ?? 0)
-          : 0;
-
-        const outstandingBalance = totalPurchases - totalPaid + manualCreditsBalance;
+        // Use the outstandingBalance field directly - it's the source of truth
+        // This field is kept in sync by SupplierCreditsController and PurchasesController
+        const outstandingBalance = decimalToNumber(supplier.outstandingBalance) ?? 0;
+        const totalPurchases = decimalToNumber(supplier.totalPurchases) ?? 0;
 
         return {
           ...supplier,
           totalPurchases: Number(totalPurchases.toFixed(2)),
           outstandingBalance: Number(outstandingBalance.toFixed(2)),
-          manualCreditsBalance: Number(manualCreditsBalance.toFixed(2)),
-          // Remove the purchases and supplierCredits arrays from response to keep it clean
-          purchases: undefined,
-          supplierCredits: undefined,
         };
       });
 

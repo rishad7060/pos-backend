@@ -2,11 +2,15 @@ import { Response } from 'express';
 import { prisma } from '../models/db';
 import { AuthRequest } from '../middleware/auth';
 import { decimalToNumber } from '../utils/decimal';
+import { parseLimit, getPaginationParams } from '../config/pagination';
 
 export class CustomerCreditsController {
+  /**
+   * Get customer credit history
+   */
   static async getCustomerCredits(req: AuthRequest, res: Response) {
     try {
-      const { customerId, limit = 50 } = req.query;
+      const { customerId, limit } = req.query;
 
       if (!customerId) {
         return res.status(400).json({
@@ -23,7 +27,7 @@ export class CustomerCreditsController {
         });
       }
 
-      const take = Math.min(parseInt(limit as string) || 50, 1000);
+      const take = Math.min(parseLimit(limit, 'customerCredits'), 1000);
 
       const credits = await prisma.customerCredit.findMany({
         where: {
@@ -64,6 +68,10 @@ export class CustomerCreditsController {
     }
   }
 
+  /**
+   * Create credit transaction
+   * IMPORTANT: Uses correct schema transaction types
+   */
   static async createCredit(req: AuthRequest, res: Response) {
     try {
       const { customerId, orderId, transactionType, amount, description, userId } = req.body;
@@ -76,7 +84,7 @@ export class CustomerCreditsController {
       }
 
       const customerIdNum = parseInt(customerId);
-      let amountNum = parseFloat(amount);
+      const amountNum = parseFloat(amount);
 
       if (isNaN(customerIdNum) || isNaN(amountNum)) {
         return res.status(400).json({
@@ -85,45 +93,81 @@ export class CustomerCreditsController {
         });
       }
 
-      // CRITICAL FIX: Validate transaction type
-      const validTypes = ['credit', 'debit', 'admin_credit'];
+      // CORRECTED: Use schema-defined transaction types
+      // admin_adjustment = Customer debt to admin (old books, not from POS sales)
+      // credit_added = Unpaid POS order (counts as revenue)
+      // credit_used = Payment received
+      // credit_refunded = Refund to customer credit
+      const validTypes = ['credit_added', 'credit_used', 'credit_refunded', 'admin_adjustment'];
       if (!validTypes.includes(transactionType)) {
         return res.status(400).json({
-          error: 'Invalid transaction type. Must be: credit, debit, or admin_credit',
+          error: 'Invalid transaction type. Must be: credit_added, credit_used, credit_refunded, or admin_adjustment',
           code: 'INVALID_TRANSACTION_TYPE',
         });
       }
 
-      // CRITICAL FIX: Enforce sign convention for data integrity
-      // credit/admin_credit = customer owes us (POSITIVE amount)
-      // debit = customer payment (NEGATIVE amount)
-      if (transactionType === 'credit' || transactionType === 'admin_credit') {
-        amountNum = Math.abs(amountNum); // Ensure positive
-      } else if (transactionType === 'debit') {
-        amountNum = -Math.abs(amountNum); // Ensure negative
+      if (amountNum <= 0) {
+        return res.status(400).json({
+          error: 'Amount must be greater than 0',
+          code: 'INVALID_AMOUNT',
+        });
       }
 
-      // Calculate the new balance by summing all existing credits for this customer
-      const existingCredits = await prisma.customerCredit.findMany({
+      // Get customer current balance
+      const customer = await prisma.customer.findUnique({
+        where: { id: customerIdNum },
+      });
+
+      if (!customer) {
+        return res.status(404).json({
+          error: 'Customer not found',
+          code: 'CUSTOMER_NOT_FOUND',
+        });
+      }
+
+      // Calculate ACTUAL balance from all transactions (don't trust customer.creditBalance as it might be stale)
+      const allTransactions = await prisma.customerCredit.findMany({
         where: { customerId: customerIdNum },
-        select: { amount: true },
         orderBy: { createdAt: 'asc' },
       });
 
-      // Calculate running balance
-      let runningBalance = 0;
-      for (const credit of existingCredits) {
-        runningBalance += decimalToNumber(credit.amount) ?? 0;
+      let currentBalance = 0;
+      for (const txn of allTransactions) {
+        const txnAmount = decimalToNumber(txn.amount) ?? 0;
+        if (txn.transactionType === 'credit_added' || txn.transactionType === 'credit_refunded' || txn.transactionType === 'admin_adjustment') {
+          currentBalance += txnAmount;
+        } else if (txn.transactionType === 'credit_used') {
+          currentBalance -= txnAmount;
+        }
       }
-      runningBalance += amountNum; // Add the new transaction
 
+      let newBalance = currentBalance;
+
+      // Calculate new balance based on transaction type
+      // admin_adjustment: Customer owes us (add to balance - customer debt)
+      // credit_added: Unpaid order (add to balance - customer debt)
+      // credit_refunded: Refund to customer (add to balance - we owe them)
+      // credit_used: Payment received (subtract from balance - debt reduced)
+      if (transactionType === 'credit_added' || transactionType === 'credit_refunded' || transactionType === 'admin_adjustment') {
+        newBalance = currentBalance + amountNum;
+      } else if (transactionType === 'credit_used') {
+        newBalance = currentBalance - amountNum;
+        if (newBalance < 0) {
+          return res.status(400).json({
+            error: 'Insufficient credit balance',
+            code: 'INSUFFICIENT_CREDIT',
+          });
+        }
+      }
+
+      // Create credit transaction
       const credit = await prisma.customerCredit.create({
         data: {
           customerId: customerIdNum,
           orderId: orderId ? parseInt(orderId) : null,
           transactionType,
           amount: amountNum,
-          balance: runningBalance,
+          balance: newBalance,
           description: description || null,
           userId: userId ? parseInt(userId) : req.user?.id || null,
         },
@@ -135,6 +179,12 @@ export class CustomerCreditsController {
             select: { id: true, orderNumber: true, total: true },
           },
         },
+      });
+
+      // Update customer balance
+      await prisma.customer.update({
+        where: { id: customerIdNum },
+        data: { creditBalance: newBalance },
       });
 
       // Convert Decimal types to numbers
@@ -159,6 +209,127 @@ export class CustomerCreditsController {
         });
       }
 
+      return res.status(500).json({
+        error: 'Internal server error',
+        code: 'INTERNAL_ERROR',
+        message: error.message,
+      });
+    }
+  }
+
+  /**
+   * Get all customers with credit balances
+   */
+  static async getCustomersWithCredit(req: AuthRequest, res: Response) {
+    try {
+      const customers = await prisma.customer.findMany({
+        where: {
+          creditBalance: { gt: 0 },
+          deletedAt: null,
+        },
+        select: {
+          id: true,
+          name: true,
+          phone: true,
+          email: true,
+          creditBalance: true,
+          totalPurchases: true,
+          visitCount: true,
+          createdAt: true,
+        },
+        orderBy: {
+          creditBalance: 'desc',
+        },
+      });
+
+      const serialized = customers.map(customer => ({
+        ...customer,
+        creditBalance: decimalToNumber(customer.creditBalance) ?? 0,
+        totalPurchases: decimalToNumber(customer.totalPurchases) ?? 0,
+      }));
+
+      return res.json(serialized);
+    } catch (error) {
+      console.error('Get customers with credit error:', error);
+      return res.status(500).json({
+        error: 'Internal server error',
+        code: 'INTERNAL_ERROR',
+      });
+    }
+  }
+
+  /**
+   * Get credit summary report
+   */
+  static async getCreditSummary(req: AuthRequest, res: Response) {
+    try {
+      const { startDate, endDate } = req.query;
+
+      const where: any = {};
+
+      if (startDate || endDate) {
+        where.createdAt = {};
+        if (startDate) {
+          where.createdAt.gte = new Date(startDate as string);
+        }
+        if (endDate) {
+          const end = new Date(endDate as string);
+          end.setHours(23, 59, 59, 999);
+          where.createdAt.lte = end;
+        }
+      }
+
+      // Get all credit transactions in period
+      const credits = await prisma.customerCredit.findMany({
+        where,
+        include: {
+          customer: {
+            select: { name: true },
+          },
+        },
+      });
+
+      // Calculate totals - SEPARATE admin adjustments from POS credit sales for finance accuracy
+      const posCreditSales = credits.filter(c => c.transactionType === 'credit_added'); // POS orders (counts as revenue)
+      const adminAdjustments = credits.filter(c => c.transactionType === 'admin_adjustment'); // Old debts (NOT revenue)
+      const paymentsReceived = credits.filter(c => c.transactionType === 'credit_used');
+      const refunds = credits.filter(c => c.transactionType === 'credit_refunded');
+
+      const totalPOSCreditSales = posCreditSales.reduce((sum, c) => sum + (decimalToNumber(c.amount) ?? 0), 0);
+      const totalAdminAdjustments = adminAdjustments.reduce((sum, c) => sum + (decimalToNumber(c.amount) ?? 0), 0);
+      const totalPaymentsReceived = paymentsReceived.reduce((sum, c) => sum + (decimalToNumber(c.amount) ?? 0), 0);
+      const totalRefunds = refunds.reduce((sum, c) => sum + (decimalToNumber(c.amount) ?? 0), 0);
+
+      // Get current total outstanding credits
+      const customersWithCredit = await prisma.customer.findMany({
+        where: {
+          creditBalance: { gt: 0 },
+          deletedAt: null,
+        },
+      });
+
+      const totalOutstanding = customersWithCredit.reduce((sum, c) => sum + (decimalToNumber(c.creditBalance) ?? 0), 0);
+
+      return res.json({
+        summary: {
+          // For FINANCE/REVENUE reporting - excludes admin adjustments
+          totalPOSCreditSales: Number(totalPOSCreditSales.toFixed(2)), // Actual POS revenue
+          totalPaymentsReceived: Number(totalPaymentsReceived.toFixed(2)), // Cash collected
+
+          // For ACCOUNTS RECEIVABLE tracking - includes everything
+          totalAdminAdjustments: Number(totalAdminAdjustments.toFixed(2)), // Old debts (not revenue)
+          totalRefunds: Number(totalRefunds.toFixed(2)), // Refunds issued
+          totalOutstanding: Number(totalOutstanding.toFixed(2)), // Total AR balance
+          customersWithCredit: customersWithCredit.length,
+        },
+        // Transaction counts
+        posCreditSalesCount: posCreditSales.length,
+        adminAdjustmentsCount: adminAdjustments.length,
+        paymentsReceivedCount: paymentsReceived.length,
+        refundsCount: refunds.length,
+      });
+    } catch (error) {
+      console.error('Get credit summary error:', error);
       return res.status(500).json({
         error: 'Internal server error',
         code: 'INTERNAL_ERROR',

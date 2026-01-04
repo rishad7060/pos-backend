@@ -2,6 +2,7 @@ import { Response } from 'express';
 import { prisma } from '../models/db';
 import { AuthRequest } from '../middleware/auth';
 import { decimalToNumber } from '../utils/decimal';
+import { parseLimit, getPaginationParams } from '../config/pagination';
 
 export class CustomersController {
   static async getCustomers(req: AuthRequest, res: Response) {
@@ -24,33 +25,32 @@ export class CustomersController {
         ];
       }
 
-      const take = limit ? Math.min(parseInt(limit as string), 1000) : 100;
+      const take = limit ? parseLimit(limit, 'customers') : 100;
 
-      // PERFORMANCE FIX: Include credit balance in single query to avoid N+1 problem
-      // Previously: 1 query for customers + N queries for credit balance = 101 API calls
-      // Now: 1 query with JOIN = 1 API call (100x faster!)
+      // MIGRATION FIX: Use creditBalance field directly - it's the source of truth
+      // This field is kept in sync by CustomerCreditsController and OrdersController
+      // For migrated data: customer.creditBalance reflects actual outstanding balance
       const customers = await prisma.customer.findMany({
         where,
         orderBy: {
           createdAt: 'desc',
         },
         take,
-        include: {
-          customerCredits: {
-            orderBy: { createdAt: 'desc' },
-            take: 1,
-            select: { balance: true },
-          },
-        },
+        // No need to include customerCredits - we use the cached creditBalance field
       });
 
-      // Convert Decimal types to numbers and include creditBalance
-      const serialized = customers.map(customer => ({
-        ...customer,
-        totalPurchases: decimalToNumber(customer.totalPurchases) ?? 0,
-        creditBalance: customer.customerCredits[0] ? decimalToNumber(customer.customerCredits[0].balance) ?? 0 : 0,
-        customerCredits: undefined, // Remove customerCredits array from response
-      }));
+      // Convert Decimal types to numbers
+      const serialized = customers.map(customer => {
+        // Use the creditBalance field directly - it's the source of truth
+        const creditBalance = decimalToNumber(customer.creditBalance) ?? 0;
+        const totalPurchases = decimalToNumber(customer.totalPurchases) ?? 0;
+
+        return {
+          ...customer,
+          totalPurchases: Number(totalPurchases.toFixed(2)),
+          creditBalance: Number(creditBalance.toFixed(2)),
+        };
+      });
 
       return res.json(serialized);
     } catch (error) {
@@ -152,7 +152,7 @@ export class CustomersController {
         });
       }
 
-      // Get customer with orders (simplified first)
+      // Get customer with orders (including payment details)
       const customer = await prisma.customer.findUnique({
         where: { id: customerId },
         include: {
@@ -170,6 +170,9 @@ export class CustomersController {
                   fullName: true,
                 },
               },
+              paymentDetails: {
+                orderBy: { id: 'asc' },
+              },
             },
           },
         },
@@ -182,7 +185,7 @@ export class CustomersController {
         });
       }
 
-      // Get credit transactions
+      // Get credit transactions (ordered chronologically for correct balance calculation)
       const creditTransactions = await prisma.customerCredit.findMany({
         where: { customerId },
         include: {
@@ -193,23 +196,47 @@ export class CustomersController {
             select: { id: true, orderNumber: true, total: true },
           },
         },
-        orderBy: { createdAt: 'desc' },
+        orderBy: { createdAt: 'asc' }, // CRITICAL: Process chronologically
       });
 
-      // Calculate current credit balance
-      const creditBalance = creditTransactions.length > 0 ? creditTransactions[0].balance : 0;
+      // REWRITE: Calculate current credit balance from transaction history
+      // DO NOT trust the stored balance field - recalculate from scratch
+      let runningBalance = 0;
+      let totalCreditSales = 0;
+      let totalPayments = 0;
 
-      // Calculate stats
-      const totalOrders = customer.orders.length;
-      const totalCreditSales = customer.orders
-        .filter(order => order.paymentMethod === 'credit')
-        .reduce((sum, order) => sum + (decimalToNumber(order.total) ?? 0), 0);
-      const totalPayments = creditTransactions
-        .filter(credit => credit.transactionType === 'payment')
-        .reduce((sum, credit) => sum + Math.abs(decimalToNumber(credit.amount) ?? 0), 0);
+      // Create enhanced transactions with correct running balance
+      const transactionsWithBalance = creditTransactions.map(transaction => {
+        const amount = decimalToNumber(transaction.amount) ?? 0;
+        const type = transaction.transactionType;
+
+        // Credits increase balance (customer owes more)
+        if (type === 'admin_adjustment' || type === 'credit_added' || type === 'credit_refunded' || type === 'sale') {
+          runningBalance += amount;
+
+          // Track credit sales (unpaid orders only, not admin adjustments)
+          if (type === 'credit_added' || type === 'sale') {
+            totalCreditSales += amount;
+          }
+        }
+        // Payments decrease balance (customer paid)
+        else if (type === 'credit_used' || type === 'payment') {
+          runningBalance -= amount;
+          totalPayments += amount;
+        }
+
+        // Return transaction with corrected balance
+        return {
+          ...transaction,
+          correctedBalance: Math.max(0, runningBalance),
+        };
+      });
+
+      // Final balance
+      const creditBalance = Math.max(0, runningBalance);
 
       const stats = {
-        totalOrders,
+        totalOrders: customer.orders.length,
         totalCreditSales: Number(totalCreditSales),
         totalPayments: Number(totalPayments),
         pendingBalance: Number(creditBalance),
@@ -222,37 +249,75 @@ export class CustomersController {
       };
 
       // Convert orders data
-      const serializedOrders = customer.orders.map(order => ({
-        ...order,
-        subtotal: decimalToNumber(order.subtotal) ?? 0,
-        discountAmount: decimalToNumber(order.discountAmount) ?? 0,
-        total: decimalToNumber(order.total) ?? 0,
-        cashierName: order.cashier?.fullName || null,
-        items: order.orderItems.map(item => {
-          // Map quantityType from database values to frontend expected values
-          const quantityType = item.quantityType === 'kg' || item.quantityType === 'g' || item.quantityType === 'box' ? 'weight' : 'unit';
+      const serializedOrders = customer.orders.map(order => {
+        // Get credit transactions for this order to show payment allocation
+        const orderCreditTxs = creditTransactions.filter(tx => tx.orderId === order.id);
 
-          return {
-            id: item.id,
-            itemName: item.product?.name || 'Unknown Product',
-            netWeightKg: decimalToNumber(item.netWeightKg) ?? 0,
-            pricePerKg: decimalToNumber(item.pricePerKg) ?? 0,
-            finalTotal: decimalToNumber(item.finalTotal) ?? 0,
-            quantityType: quantityType,
-          };
-        }),
-      }));
+        let paidToAdmin = 0;
+        let paidToOldOrders = 0;
+        let unpaidAmount = 0;
 
-      // Convert credit transactions
-      const serializedCreditTransactions = creditTransactions.map(credit => ({
-        ...credit,
-        amount: decimalToNumber(credit.amount) ?? 0,
-        balance: decimalToNumber(credit.balance) ?? 0,
-        order: credit.order ? {
-          ...credit.order,
-          total: decimalToNumber(credit.order.total) ?? 0,
-        } : null,
-      }));
+        orderCreditTxs.forEach(tx => {
+          const amount = decimalToNumber(tx.amount) ?? 0;
+          if (tx.transactionType === 'credit_used') {
+            if (tx.description?.includes('Admin')) {
+              paidToAdmin += amount;
+            } else if (tx.description?.includes('Old order')) {
+              paidToOldOrders += amount;
+            }
+          } else if (tx.transactionType === 'credit_added') {
+            unpaidAmount += amount;
+          }
+        });
+
+        return {
+          ...order,
+          subtotal: decimalToNumber(order.subtotal) ?? 0,
+          discountAmount: decimalToNumber(order.discountAmount) ?? 0,
+          total: decimalToNumber(order.total) ?? 0,
+          amountPaid: decimalToNumber(order.amountPaid) ?? 0,
+          creditUsed: decimalToNumber(order.creditUsed) ?? 0,
+          cashierName: order.cashier?.fullName || null,
+          // Payment allocation breakdown
+          paidToAdmin,
+          paidToOldOrders,
+          unpaidAmount,
+          items: order.orderItems.map(item => {
+            // Map quantityType from database values to frontend expected values
+            const quantityType = item.quantityType === 'kg' || item.quantityType === 'g' || item.quantityType === 'box' ? 'weight' : 'unit';
+
+            return {
+              id: item.id,
+              itemName: item.product?.name || 'Unknown Product',
+              netWeightKg: decimalToNumber(item.netWeightKg) ?? 0,
+              pricePerKg: decimalToNumber(item.pricePerKg) ?? 0,
+              finalTotal: decimalToNumber(item.finalTotal) ?? 0,
+              quantityType: quantityType,
+            };
+          }),
+          paymentDetails: order.paymentDetails?.map(payment => ({
+            id: payment.id,
+            paymentType: payment.paymentType,
+            amount: decimalToNumber(payment.amount) ?? 0,
+            cardType: payment.cardType || null,
+            reference: payment.reference || null,
+          })) || [],
+        };
+      });
+
+      // Convert credit transactions and reverse for UI display (newest first)
+      const serializedCreditTransactions = transactionsWithBalance
+        .map(credit => ({
+          ...credit,
+          amount: decimalToNumber(credit.amount) ?? 0,
+          balance: credit.correctedBalance, // Use recalculated balance, not stored balance
+          correctedBalance: undefined, // Remove temporary field
+          order: credit.order ? {
+            ...credit.order,
+            total: decimalToNumber(credit.order.total) ?? 0,
+          } : null,
+        }))
+        .reverse(); // Show newest transactions first in UI
 
       return res.json({
         customer: serializedCustomer,
@@ -655,6 +720,150 @@ export class CustomersController {
 
     } catch (error: any) {
       console.error('Add manual credit error:', error);
+      return res.status(500).json({
+        error: 'Internal server error',
+        code: 'INTERNAL_ERROR',
+      });
+    }
+  }
+
+  /**
+   * Get customer balance with detailed breakdown
+   * For POS: Shows total unpaid amount (admin credits + previous order credits)
+   */
+  static async getCustomerBalance(req: AuthRequest, res: Response) {
+    try {
+      const { id } = req.params;
+
+      if (!id) {
+        return res.status(400).json({
+          error: 'Customer ID is required',
+          code: 'MISSING_CUSTOMER_ID',
+        });
+      }
+
+      const customerId = parseInt(id);
+      if (isNaN(customerId)) {
+        return res.status(400).json({
+          error: 'Invalid customer ID',
+          code: 'INVALID_CUSTOMER_ID',
+        });
+      }
+
+      // Get customer details
+      const customer = await prisma.customer.findUnique({
+        where: { id: customerId, deletedAt: null },
+        select: {
+          id: true,
+          name: true,
+          phone: true,
+          email: true,
+          creditBalance: true,
+          totalPurchases: true,
+          visitCount: true,
+        },
+      });
+
+      if (!customer) {
+        return res.status(404).json({
+          error: 'Customer not found',
+          code: 'CUSTOMER_NOT_FOUND',
+        });
+      }
+
+      // Get credit transaction history
+      const creditTransactions = await prisma.customerCredit.findMany({
+        where: { customerId },
+        orderBy: { createdAt: 'desc' },
+        take: 10,
+        include: {
+          order: {
+            select: { id: true, orderNumber: true, total: true, createdAt: true },
+          },
+          user: {
+            select: { id: true, fullName: true },
+          },
+        },
+      });
+
+      // Calculate breakdown of current outstanding balance
+      // Need to get ALL transactions to calculate running balances
+      const allTransactions = await prisma.customerCredit.findMany({
+        where: { customerId },
+        orderBy: { createdAt: 'asc' },
+      });
+
+      let adminCredits = 0;
+      let orderCredits = 0;
+
+      for (const transaction of allTransactions) {
+        const amount = decimalToNumber(transaction.amount) ?? 0;
+
+        if (transaction.transactionType === 'admin_adjustment') {
+          // Admin adjustment - customer debt to us (old books, not from POS sales)
+          // This is NOT a liability - customer owes us this amount
+          adminCredits += amount;
+        } else if (transaction.transactionType === 'credit_added' && transaction.orderId) {
+          // Unpaid amount from orders (new system)
+          orderCredits += amount;
+        } else if (transaction.transactionType === 'sale') {
+          // Credit purchase (old system - treat as order credit)
+          orderCredits += amount;
+        } else if (transaction.transactionType === 'credit_used' || transaction.transactionType === 'payment') {
+          // Payment reduces balance (subtract from admin first, then orders)
+          // Note: "payment" is old transaction type
+          const paymentAmount = Math.abs(amount);
+
+          if (adminCredits > 0) {
+            const paidToAdmin = Math.min(paymentAmount, adminCredits);
+            adminCredits -= paidToAdmin;
+            const remaining = paymentAmount - paidToAdmin;
+
+            if (remaining > 0 && orderCredits > 0) {
+              const paidToOrders = Math.min(remaining, orderCredits);
+              orderCredits -= paidToOrders;
+            }
+          } else if (orderCredits > 0) {
+            const paidToOrders = Math.min(paymentAmount, orderCredits);
+            orderCredits -= paidToOrders;
+          }
+        }
+      }
+
+      // Calculate total from breakdown (don't trust stale customer.creditBalance)
+      const totalBalance = adminCredits + orderCredits;
+
+      // Serialize transactions
+      const serializedTransactions = creditTransactions.map(t => ({
+        ...t,
+        amount: decimalToNumber(t.amount) ?? 0,
+        balance: decimalToNumber(t.balance) ?? 0,
+        order: t.order ? {
+          ...t.order,
+          total: decimalToNumber(t.order.total) ?? 0,
+        } : null,
+      }));
+
+      return res.json({
+        customer: {
+          id: customer.id,
+          name: customer.name,
+          phone: customer.phone,
+          email: customer.email,
+          totalPurchases: decimalToNumber(customer.totalPurchases) ?? 0,
+          visitCount: customer.visitCount,
+        },
+        balance: {
+          total: totalBalance,
+          breakdown: {
+            adminCredits: adminCredits,
+            orderCredits: orderCredits,
+          },
+        },
+        recentTransactions: serializedTransactions,
+      });
+    } catch (error) {
+      console.error('Get customer balance error:', error);
       return res.status(500).json({
         error: 'Internal server error',
         code: 'INTERNAL_ERROR',

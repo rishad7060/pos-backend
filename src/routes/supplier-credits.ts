@@ -15,6 +15,12 @@ router.get('/', SupplierCreditsController.getSupplierCredits);
 // GET /api/supplier-credits/balance - Get current supplier balance
 router.get('/balance', SupplierCreditsController.getSupplierBalance);
 
+// POST /api/supplier-credits/recalculate - Recalculate supplier balance from ledger
+router.post('/recalculate', SupplierCreditsController.recalculateBalance);
+
+// POST /api/supplier-credits/payment - Record payment with FIFO allocation
+router.post('/payment', SupplierCreditsController.recordPayment);
+
 // POST /api/supplier-credits - Create supplier credit transaction (manual admin entry)
 router.post('/', SupplierCreditsController.createCredit);
 

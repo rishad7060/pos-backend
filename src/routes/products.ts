@@ -8,6 +8,9 @@ const router = Router();
 // All routes require authentication
 router.use(authenticate);
 
+// GET /api/products/stats - Get product statistics
+router.get('/stats', ProductsController.getProductStats);
+
 // GET /api/products - Get products
 router.get('/', ProductsController.getProducts);
 

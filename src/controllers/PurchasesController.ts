@@ -2,11 +2,13 @@ import { Response } from 'express';
 import { prisma } from '../models/db';
 import { AuthRequest } from '../middleware/auth';
 import { decimalToNumber } from '../utils/decimal';
+import { createStockBatch } from '../services/batchService';
+import { parseLimit } from '../config/pagination';
 
 export class PurchasesController {
   static async getPurchases(req: AuthRequest, res: Response) {
     try {
-      const { id, supplierId, status, limit = 200 } = req.query;
+      const { id, supplierId, status, limit } = req.query;
 
       // Get single purchase by ID
       if (id) {
@@ -85,19 +87,31 @@ export class PurchasesController {
           });
         }
 
-        // Calculate paid amount from payments
-        const paidAmount = purchase.purchasePayments.reduce((sum, payment) => {
-          return sum + (decimalToNumber(payment.amount) ?? 0);
-        }, 0);
-
         // Convert Decimal to numbers
+        // IMPORTANT: Use purchase.paidAmount directly (updated by FIFO allocation)
+
+        // Check if this PO has FIFO payment allocations
+        const supplierCredit = await prisma.supplierCredit.findFirst({
+          where: { purchaseId: purchase.id },
+          select: { id: true },
+        });
+
+        let hasFifoPayments = false;
+        if (supplierCredit) {
+          const allocationCount = await prisma.supplierPaymentAllocation.count({
+            where: { allocatedCreditId: supplierCredit.id },
+          });
+          hasFifoPayments = allocationCount > 0;
+        }
+
         const serialized = {
           ...purchase,
           subtotal: decimalToNumber(purchase.subtotal) ?? 0,
           taxAmount: decimalToNumber(purchase.taxAmount) ?? 0,
           shippingCost: decimalToNumber(purchase.shippingCost) ?? 0,
           total: decimalToNumber(purchase.total) ?? 0,
-          paidAmount,
+          paidAmount: decimalToNumber(purchase.paidAmount) ?? 0, // Use field directly (FIFO updates this)
+          hasFifoPayments, // Flag to indicate FIFO payments exist
           items: purchase.purchaseItems.map((item) => ({
             ...item,
             quantity: decimalToNumber(item.quantity) ?? 0,
@@ -122,6 +136,11 @@ export class PurchasesController {
           })),
         };
 
+        // Prevent caching to ensure fresh data
+        res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+        res.setHeader('Pragma', 'no-cache');
+        res.setHeader('Expires', '0');
+        res.setHeader('Surrogate-Control', 'no-store');
         return res.json(serialized);
       }
 
@@ -148,21 +167,14 @@ export class PurchasesController {
         orderBy: {
           createdAt: 'desc',
         },
-        take: Math.min(parseInt(limit as string) || 200, 1000),
+        take: Math.min(parseLimit(limit, 'orders'), 1000),
       });
 
-      // Convert Decimal to numbers and calculate paid amounts
+      // Convert Decimal to numbers
+      // IMPORTANT: Use purchase.paidAmount directly (updated by FIFO allocation)
+      // instead of calculating from purchasePayment table
       const serialized = await Promise.all(
         purchases.map(async (purchase) => {
-          const payments = await prisma.purchasePayment.findMany({
-            where: { purchaseId: purchase.id },
-            select: { amount: true },
-          });
-
-          const paidAmount = payments.reduce((sum, payment) => {
-            return sum + (decimalToNumber(payment.amount) ?? 0);
-          }, 0);
-
           const items = purchase.purchaseItems.map((item) => ({
             ...item,
             quantity: decimalToNumber(item.quantity) ?? 0,
@@ -171,18 +183,39 @@ export class PurchasesController {
             receivedQuantity: decimalToNumber(item.receivedQuantity) ?? 0,
           }));
 
+          // Check if this PO has FIFO payment allocations
+          const supplierCredit = await prisma.supplierCredit.findFirst({
+            where: { purchaseId: purchase.id },
+            select: { id: true },
+          });
+
+          let hasFifoPayments = false;
+          if (supplierCredit) {
+            const allocationCount = await prisma.supplierPaymentAllocation.count({
+              where: { allocatedCreditId: supplierCredit.id },
+            });
+            hasFifoPayments = allocationCount > 0;
+          }
+
           return {
             ...purchase,
             subtotal: decimalToNumber(purchase.subtotal) ?? 0,
             taxAmount: decimalToNumber(purchase.taxAmount) ?? 0,
             shippingCost: decimalToNumber(purchase.shippingCost) ?? 0,
             total: decimalToNumber(purchase.total) ?? 0,
-            paidAmount,
+            paidAmount: decimalToNumber(purchase.paidAmount) ?? 0, // Use field directly (FIFO updates this)
+            hasFifoPayments, // Flag to indicate FIFO payments exist
             items, // Frontend expects 'items'
             purchaseItems: items, // Keep for backward compatibility
           };
         })
       );
+
+      // Prevent caching to ensure fresh data
+      res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+      res.setHeader('Pragma', 'no-cache');
+      res.setHeader('Expires', '0');
+      res.setHeader('Surrogate-Control', 'no-store');
 
       return res.json(serialized);
     } catch (error: any) {
@@ -265,6 +298,115 @@ export class PurchasesController {
             })
           )
         );
+
+        // Auto-create supplier credit for this PO (adds to supplier's outstanding balance)
+        const { calculateNewBalance } = require('../services/supplierCreditService');
+        const totalAmount = newPurchase.total || subtotal + (taxAmount || 0) + (shippingCost || 0);
+
+        // Check if supplier has negative outstanding balance (credit from returns/overpayments)
+        const supplier = await tx.supplier.findUnique({
+          where: { id: parseInt(supplierId) },
+          select: { outstandingBalance: true },
+        });
+
+        const currentOutstanding = decimalToNumber(supplier?.outstandingBalance) ?? 0;
+        const totalAmountNum = decimalToNumber(totalAmount) ?? 0;
+
+        // Calculate how much of the available credit can be applied to this PO
+        let creditToApply = 0;
+        let purchasePaidAmount = 0;
+        let purchasePaymentStatus = 'unpaid';
+
+        if (currentOutstanding < 0) {
+          // There's available credit (negative outstanding means they overpaid or returned items)
+          const availableCredit = Math.abs(currentOutstanding);
+          creditToApply = Math.min(availableCredit, totalAmountNum);
+          purchasePaidAmount = creditToApply;
+
+          // Determine payment status
+          if (creditToApply >= totalAmountNum) {
+            purchasePaymentStatus = 'paid';
+          } else if (creditToApply > 0) {
+            purchasePaymentStatus = 'partial';
+          }
+        }
+
+        const newBalance = await calculateNewBalance(parseInt(supplierId), totalAmountNum, tx);
+
+        const purchaseCredit = await tx.supplierCredit.create({
+          data: {
+            supplierId: parseInt(supplierId),
+            purchaseId: newPurchase.id,
+            transactionType: 'credit',
+            amount: totalAmount,
+            balance: newBalance,
+            description: `Purchase order ${purchaseNumber}`,
+            userId: userId ? parseInt(userId) : req.user?.id || null,
+            paidAmount: creditToApply, // Apply available credit immediately
+            paymentStatus: purchasePaymentStatus,
+          },
+        });
+
+        // Update purchase with applied credit
+        if (creditToApply > 0) {
+          await tx.purchase.update({
+            where: { id: newPurchase.id },
+            data: {
+              paidAmount: purchasePaidAmount,
+              paymentStatus: purchasePaymentStatus,
+            },
+          });
+
+          // Find existing debit transactions (from returns/payments) that created the available credit
+          // We'll allocate from the most recent debits that created the negative balance
+          const debitTransactions = await tx.supplierCredit.findMany({
+            where: {
+              supplierId: parseInt(supplierId),
+              transactionType: 'debit',
+            },
+            orderBy: {
+              createdAt: 'desc', // Most recent first
+            },
+            take: 10, // Get recent debits
+          });
+
+          // Create allocation records linking the debit transactions to this PO
+          // This makes the payment visible in the PO's payment history
+          let remainingToAllocate = creditToApply;
+
+          for (const debit of debitTransactions) {
+            if (remainingToAllocate <= 0) break;
+
+            const debitAmount = Math.abs(decimalToNumber(debit.amount) ?? 0);
+            const amountToAllocateFromThisDebit = Math.min(remainingToAllocate, debitAmount);
+
+            if (amountToAllocateFromThisDebit > 0) {
+              await tx.supplierPaymentAllocation.create({
+                data: {
+                  paymentCreditId: debit.id, // The debit that provided the funds
+                  allocatedCreditId: purchaseCredit.id, // The PO credit being paid
+                  allocatedAmount: amountToAllocateFromThisDebit,
+                },
+              });
+
+              remainingToAllocate -= amountToAllocateFromThisDebit;
+            }
+          }
+        }
+
+        // Update supplier's outstanding balance
+        // Simply use newBalance which is calculated from all transactions
+        const finalBalance = newBalance;
+
+        await tx.supplier.update({
+          where: { id: parseInt(supplierId) },
+          data: {
+            outstandingBalance: finalBalance,
+            totalPurchases: {
+              increment: totalAmount,
+            },
+          },
+        });
 
         return { ...newPurchase, purchaseItems };
       });
@@ -384,14 +526,15 @@ export class PurchasesController {
 export class PurchasePaymentsController {
   static async getPayments(req: AuthRequest, res: Response) {
     try {
-      const { purchaseId, limit = 100 } = req.query;
+      const { purchaseId, limit } = req.query;
 
       const where: any = {};
       if (purchaseId) {
         where.purchaseId = parseInt(purchaseId as string);
       }
 
-      const payments = await prisma.purchasePayment.findMany({
+      // Get old-style purchase payments (for backward compatibility)
+      const oldPayments = await prisma.purchasePayment.findMany({
         where,
         include: {
           purchase: {
@@ -412,16 +555,87 @@ export class PurchasePaymentsController {
         orderBy: {
           paymentDate: 'desc',
         },
-        take: Math.min(parseInt(limit as string) || 100, 1000),
+        take: Math.min(parseLimit(limit, 'orders'), 1000),
       });
 
-      // Convert Decimal to numbers
-      const serialized = payments.map((payment) => ({
+      // Convert old payments to standard format
+      const serializedOldPayments = oldPayments.map((payment) => ({
         ...payment,
         amount: decimalToNumber(payment.amount) ?? 0,
+        source: 'direct', // Mark as direct payment
       }));
 
-      return res.json(serialized);
+      // If purchaseId provided, also get FIFO payment allocations
+      let fifoPayments: any[] = [];
+      if (purchaseId) {
+        const purchaseIdNum = parseInt(purchaseId as string);
+
+        // Get the supplier credit entry for this purchase
+        const purchaseCredit = await prisma.supplierCredit.findFirst({
+          where: { purchaseId: purchaseIdNum },
+        });
+
+        if (purchaseCredit) {
+          // Get all payment allocations to this PO's credit
+          const allocations = await prisma.supplierPaymentAllocation.findMany({
+            where: {
+              allocatedCreditId: purchaseCredit.id,
+            },
+            include: {
+              paymentCredit: {
+                include: {
+                  supplier: {
+                    select: {
+                      id: true,
+                      name: true,
+                    },
+                  },
+                },
+              },
+              allocatedCredit: {
+                include: {
+                  purchase: {
+                    select: {
+                      id: true,
+                      purchaseNumber: true,
+                      total: true,
+                    },
+                  },
+                },
+              },
+            },
+            orderBy: {
+              createdAt: 'desc',
+            },
+          });
+
+          // Convert FIFO allocations to payment format
+          fifoPayments = allocations.map((alloc) => ({
+            id: alloc.id,
+            purchaseId: purchaseIdNum,
+            amount: decimalToNumber(alloc.allocatedAmount) ?? 0,
+            paymentMethod: 'Supplier Payment (FIFO)', // Indicate FIFO allocation
+            paymentDate: alloc.createdAt,
+            reference: alloc.paymentCredit.description || '',
+            notes: `Allocated from supplier payment: ${alloc.paymentCredit.description}`,
+            createdAt: alloc.createdAt,
+            purchase: alloc.allocatedCredit.purchase,
+            user: null, // FIFO payments don't have user attribution in current schema
+            source: 'fifo', // Mark as FIFO allocation
+            supplierId: alloc.paymentCredit.supplierId,
+            supplier: alloc.paymentCredit.supplier,
+          }));
+        }
+      }
+
+      // Combine both payment types and sort by date
+      const allPayments = [...serializedOldPayments, ...fifoPayments].sort((a, b) => {
+        const dateA = new Date(a.paymentDate || a.createdAt).getTime();
+        const dateB = new Date(b.paymentDate || b.createdAt).getTime();
+        return dateB - dateA; // Most recent first
+      });
+
+      return res.json(allPayments);
     } catch (error: any) {
       console.error('Get purchase payments error:', error);
       return res.status(500).json({
@@ -433,194 +647,20 @@ export class PurchasePaymentsController {
   }
 
   static async createPayment(req: AuthRequest, res: Response) {
-    try {
-      const {
-        purchaseId,
-        amount,
-        paymentMethod,
-        paymentDate,
-        reference,
-        notes,
-        userId,
-        existingChequeId,
-      } = req.body;
-
-      if (!purchaseId || !amount) {
-        return res.status(400).json({
-          error: 'Purchase ID and amount are required',
-          code: 'MISSING_REQUIRED_FIELDS',
-        });
-      }
-
-      const purchase = await prisma.purchase.findUnique({
-        where: { id: parseInt(purchaseId) },
-        include: {
-          purchasePayments: true,
-        },
-      });
-
-      if (!purchase) {
-        return res.status(404).json({
-          error: 'Purchase not found',
-          code: 'PURCHASE_NOT_FOUND',
-        });
-      }
-
-      // Calculate current paid amount
-      const currentPaid = purchase.purchasePayments.reduce((sum, payment) => {
-        return sum + (decimalToNumber(payment.amount) ?? 0);
-      }, 0);
-
-      const total = decimalToNumber(purchase.total) ?? 0;
-      const remainingBalance = total - currentPaid;
-      const newPaid = currentPaid + parseFloat(amount);
-
-      if (newPaid > total) {
-        return res.status(400).json({
-          error: `Payment amount (LKR ${parseFloat(amount).toFixed(2)}) exceeds remaining balance (LKR ${remainingBalance.toFixed(2)})`,
-          code: 'PAYMENT_EXCEEDS_BALANCE',
-        });
-      }
-
-      // Use transaction
-      const result = await prisma.$transaction(async (tx) => {
-        // Create payment record
-        const payment = await tx.purchasePayment.create({
-          data: {
-            purchaseId: parseInt(purchaseId),
-            amount: parseFloat(amount),
-            paymentMethod: paymentMethod || 'cash',
-            paymentDate: paymentDate ? new Date(paymentDate) : new Date(),
-            reference: reference || null,
-            notes: notes || null,
-            userId: userId ? parseInt(userId) : req.user?.id || null,
-          },
-          include: {
-            user: {
-              select: {
-                id: true,
-                fullName: true,
-                email: true,
-              },
-            },
-          },
-        });
-
-        // Update purchase paid amount and payment status
-        const newPaymentStatus = newPaid >= total ? 'paid' : 'partial';
-        await tx.purchase.update({
-          where: { id: parseInt(purchaseId) },
-          data: {
-            paidAmount: newPaid,
-            paymentStatus: newPaymentStatus,
-          },
-        });
-
-        // Handle cheque payment
-        if (paymentMethod === 'cheque') {
-          if (existingChequeId) {
-            // Link and endorse existing cheque
-            const existingCheque = await tx.cheque.findUnique({
-              where: { id: parseInt(existingChequeId) },
-            });
-
-            if (!existingCheque) {
-              throw new Error('Existing cheque not found');
-            }
-
-            if (existingCheque.status !== 'pending') {
-              throw new Error('Can only use pending cheques');
-            }
-
-            if (existingCheque.transactionType !== 'received') {
-              throw new Error('Can only use received cheques for purchase payments');
-            }
-
-            if (existingCheque.isEndorsed) {
-              throw new Error('Cheque is already endorsed');
-            }
-
-            // Get supplier name for endorsement
-            const supplier = await tx.supplier.findUnique({
-              where: { id: purchase.supplierId },
-              select: { name: true },
-            });
-
-            // Update cheque to link to purchase payment and mark as endorsed
-            await tx.cheque.update({
-              where: { id: parseInt(existingChequeId) },
-              data: {
-                purchasePaymentId: payment.id,
-                isEndorsed: true,
-                endorsedTo: supplier?.name || 'Supplier',
-                endorsedDate: new Date(),
-                endorsedById: userId ? parseInt(userId) : req.user?.id || null,
-                notes: existingCheque.notes
-                  ? `${existingCheque.notes} | Endorsed to ${supplier?.name || 'Supplier'} for Purchase #${purchase.purchaseNumber}`
-                  : `Endorsed to ${supplier?.name || 'Supplier'} for Purchase #${purchase.purchaseNumber}`,
-                updatedAt: new Date(),
-              },
-            });
-          } else if (req.body.chequeDetails) {
-            // Create new cheque record
-            const {
-              chequeNumber,
-              chequeDate,
-              depositReminderDate,
-              payerName,
-              payeeName,
-              bankName,
-              branchName,
-              notes: chequeNotes,
-            } = req.body.chequeDetails;
-
-            await tx.cheque.create({
-              data: {
-                chequeNumber,
-                chequeDate: new Date(chequeDate),
-                depositReminderDate: depositReminderDate ? new Date(depositReminderDate) : null,
-                amount: parseFloat(amount),
-                payerName,
-                payeeName: payeeName || null,
-                bankName,
-                branchName: branchName || null,
-                status: 'pending',
-                transactionType: 'issued',
-                receivedDate: new Date(),
-                purchasePaymentId: payment.id,
-                supplierId: purchase.supplierId,
-                userId: userId ? parseInt(userId) : req.user?.id || null,
-                notes: chequeNotes || `Cheque issued for Purchase #${purchase.purchaseNumber}`,
-              },
-            });
-          }
-        }
-
-        return payment;
-      });
-
-      // Convert Decimal to numbers
-      const serialized = {
-        ...result,
-        amount: decimalToNumber(result.amount) ?? 0,
-      };
-
-      return res.status(201).json(serialized);
-    } catch (error: any) {
-      console.error('Create purchase payment error:', error);
-      return res.status(500).json({
-        error: 'Internal server error',
-        code: 'INTERNAL_ERROR',
-        message: error.message,
-      });
-    }
+    // DISABLED: Direct purchase payments are no longer allowed
+    // All supplier payments must be made through Supplier Management using FIFO allocation
+    return res.status(403).json({
+      error: 'Direct purchase payments are disabled',
+      code: 'DIRECT_PAYMENT_DISABLED',
+      message: 'All payments must be made through Supplier Management → Credits & Outstanding. The system uses FIFO (First-In-First-Out) allocation to automatically distribute payments across purchase orders.',
+    });
   }
 }
 
 export class PurchaseReceivesController {
   static async getReceives(req: AuthRequest, res: Response) {
     try {
-      const { purchaseId, limit = 100 } = req.query;
+      const { purchaseId, limit } = req.query;
 
       const where: any = {};
       if (purchaseId) {
@@ -654,7 +694,7 @@ export class PurchaseReceivesController {
         orderBy: {
           receivedDate: 'desc',
         },
-        take: Math.min(parseInt(limit as string) || 100, 1000),
+        take: Math.min(parseLimit(limit, 'orders'), 1000),
       });
 
       // Convert Decimal to numbers
@@ -810,7 +850,26 @@ export class PurchaseReceivesController {
               },
             });
 
+            // Create stock batch for FIFO cost tracking
+            const unitPrice = decimalToNumber(purchaseItem.unitPrice) ?? 0;
+            const supplierId = purchaseItem.purchase.supplierId;
+
+            await createStockBatch(
+              product.id,
+              quantityToAdd,
+              unitPrice,
+              {
+                purchaseId: parseInt(purchaseId),
+                purchaseReceiveId: receive.id,
+                supplierId: supplierId,
+                receivedDate: receivedDate ? new Date(receivedDate) : new Date(),
+                notes: `PO ${purchaseItem.purchase.purchaseNumber} - Received ${quantityToAdd} units`,
+              },
+              tx
+            );
+
             console.log(`✅ Updated stock for product ${product.name}: +${quantityToAdd} (New stock: ${newStockQuantity})`);
+            console.log(`✅ Created stock batch with cost price: ${unitPrice}`);
           }
         }
 

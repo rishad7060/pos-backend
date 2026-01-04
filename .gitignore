@@ -46,3 +46,8 @@ coverage
 *.sh
 *.bat
 *.ps1
+
+# Backup files
+backups/
+*.zip
+*.sql

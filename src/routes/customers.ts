@@ -11,6 +11,9 @@ router.use(authenticate);
 // GET /api/customers - Get customers (must come before /:id to avoid conflicts)
 router.get('/', CustomersController.getCustomers);
 
+// GET /api/customers/:id/balance - Get customer balance with breakdown (specific route before /:id)
+router.get('/:id/balance', CustomersController.getCustomerBalance);
+
 // GET /api/customers/:id - Get customer by ID
 router.get('/:id', CustomersController.getCustomerById);
 

@@ -9,6 +9,12 @@ import {
   RawItemInput,
   CalculatedItem
 } from '../utils/order-calculations';
+import { parseLimit } from '../config/pagination';
+import {
+  deductFromBatchesFIFO,
+  deductFromSpecificBatches,
+  createOrderItemBatches
+} from '../services/batchService';
 
 export class OrdersController {
   static async getOrders(req: AuthRequest, res: Response) {
@@ -19,9 +25,11 @@ export class OrdersController {
         cashierId,
         registrySessionId, // TEAM_003: Support filtering by registry session
         status,
+        paymentMethod,
+        search,
         startDate,
         endDate,
-        limit = 50,
+        limit,
         offset = 0
       } = req.query;
 
@@ -108,13 +116,26 @@ export class OrdersController {
       }
 
       if (status) {
-        if (status !== 'completed' && status !== 'voided') {
+        if (status !== 'completed' && status !== 'voided' && status !== 'pending') {
           return res.status(400).json({
-            error: "Status must be 'completed' or 'voided'",
+            error: "Status must be 'completed', 'voided', or 'pending'",
             code: "INVALID_STATUS"
           });
         }
         where.status = status;
+      }
+
+      // Filter by payment method
+      if (paymentMethod) {
+        where.paymentMethod = paymentMethod as string;
+      }
+
+      // Search by order number or customer name
+      if (search) {
+        where.OR = [
+          { orderNumber: { contains: search as string, mode: 'insensitive' } },
+          { customer: { name: { contains: search as string, mode: 'insensitive' } } }
+        ];
       }
 
       if (startDate || endDate) {
@@ -140,7 +161,7 @@ export class OrdersController {
           }
         },
         orderBy: { createdAt: 'desc' },
-        take: Math.min(parseInt(limit as string), 100),
+        take: parseLimit(limit, 'orders'),
         skip: parseInt(offset as string)
       });
 
@@ -170,6 +191,12 @@ export class OrdersController {
         changeGiven,
         payments,
         notes,
+        // Credit balance tracking
+        customerPreviousBalance = 0, // Customer's unpaid balance before this order
+        creditUsed = 0, // Amount of credit used to pay for this order
+        amountPaid, // Actual amount paid (cash/card/cheque)
+        paidToAdmin = 0, // Payment to admin credit (manual liability)
+        paidToOldOrders = 0, // Payment to old order credits
       } = req.body;
 
       // Validate required fields
@@ -342,6 +369,13 @@ export class OrdersController {
         const taxPercent = 0; // TODO: Fetch from BusinessSetting
         const orderTotals = calculateOrderTotals(calculatedItems, discountPercent, taxPercent);
 
+        // Calculate payment breakdown
+        const parsedCreditUsed = creditUsed ? parseFloat(creditUsed.toString()) : 0;
+        // IMPORTANT: Check for undefined/null, not falsy (0 is valid for credit orders!)
+        const parsedAmountPaid = amountPaid !== undefined && amountPaid !== null
+          ? parseFloat(amountPaid.toString())
+          : orderTotals.total;
+
         // Create the order with backend-calculated totals
         const order = await tx.order.create({
           data: {
@@ -355,6 +389,8 @@ export class OrdersController {
             taxAmount: orderTotals.taxAmount,
             total: orderTotals.total,
             paymentMethod: paymentMethod,
+            creditUsed: parsedCreditUsed, // Credit balance used for this order
+            amountPaid: parsedAmountPaid, // Actual cash/card paid
             cashReceived: cashReceived ? parseFloat(cashReceived) : null,
             changeGiven: changeGiven ? parseFloat(changeGiven) : null,
             notes: notes || null,
@@ -386,9 +422,49 @@ export class OrdersController {
           // Get product details
           const product = calculatedItem.productId ? productMap.get(calculatedItem.productId) : null;
 
-          // Get cost price from product
+          // Use FIFO batch tracking for cost price if product exists
           let costPrice: number | null = null;
-          if (product && product.costPrice != null) {
+          let batchDeductionResult = null;
+
+          if (calculatedItem.productId && calculatedItem.netWeightKg > 0) {
+            // Check if frontend provided specific batch allocations (manual override)
+            const itemBatchAllocations = (calculatedItem as any).batchAllocations;
+
+            if (itemBatchAllocations && Array.isArray(itemBatchAllocations) && itemBatchAllocations.length > 0) {
+              // Manual batch selection from POS
+              batchDeductionResult = await deductFromSpecificBatches(
+                calculatedItem.productId,
+                itemBatchAllocations,
+                tx
+              );
+            } else {
+              // Automatic FIFO batch deduction
+              batchDeductionResult = await deductFromBatchesFIFO(
+                calculatedItem.productId,
+                calculatedItem.netWeightKg,
+                tx
+              );
+            }
+
+            if (batchDeductionResult.success) {
+              costPrice = batchDeductionResult.averageCostPrice;
+              console.log(`✅ Allocated ${calculatedItem.netWeightKg}kg from ${batchDeductionResult.allocations.length} batch(es) at avg cost: ${costPrice.toFixed(2)}`);
+            } else {
+              // Fallback to product cost price if batch deduction fails
+              console.warn(`⚠️ Batch deduction failed: ${batchDeductionResult.message}. Falling back to product cost price.`);
+              if (product && product.costPrice != null) {
+                const productCost = product.costPrice;
+                costPrice = typeof productCost === 'object' && 'toNumber' in productCost
+                  ? productCost.toNumber()
+                  : typeof productCost === 'string'
+                    ? parseFloat(productCost)
+                    : typeof productCost === 'number'
+                      ? productCost
+                      : null;
+              }
+            }
+          } else if (product && product.costPrice != null) {
+            // Non-tracked products or manual items - use product cost price
             const productCost = product.costPrice;
             costPrice = typeof productCost === 'object' && 'toNumber' in productCost
               ? productCost.toNumber()
@@ -422,6 +498,12 @@ export class OrdersController {
               orderId: order.id,
             },
           });
+
+          // Create OrderItemBatch records if batch deduction was successful
+          if (batchDeductionResult && batchDeductionResult.success && batchDeductionResult.allocations.length > 0) {
+            await createOrderItemBatches(orderItem.id, batchDeductionResult.allocations, tx);
+            console.log(`✅ Created ${batchDeductionResult.allocations.length} batch allocation record(s) for order item`);
+          }
 
           // Check for Price Override (POS Edit)
           if (product && product.defaultPricePerKg != null) {
@@ -560,52 +642,77 @@ export class OrdersController {
 
         // Update customer stats if customer exists (using backend-calculated total)
         if (customerId) {
+          const customerIdNum = parseInt(customerId);
+
+          // Calculate new credit balance
+          // Total Due = Previous Balance + Current Order
+          // Remaining Balance = Total Due - Amount Paid
+          const parsedPreviousBalance = parseFloat(customerPreviousBalance.toString()) || 0;
+          const totalDue = parsedPreviousBalance + orderTotals.total;
+          const totalPaid = parsedAmountPaid + parsedCreditUsed;
+          const remainingBalance = totalDue - totalPaid;
+
+          // Update customer stats and credit balance
           await tx.customer.update({
-            where: { id: parseInt(customerId) },
+            where: { id: customerIdNum },
             data: {
               totalPurchases: { increment: orderTotals.total },
               visitCount: { increment: 1 },
+              creditBalance: remainingBalance, // Update to new remaining balance
             },
           });
-        }
 
-        // Calculate credit amount
-        let creditAmount = 0;
-        if (paymentMethod === 'credit') {
-          creditAmount = orderTotals.total;
-        } else if (payments && Array.isArray(payments)) {
-          creditAmount = payments
-            .filter((p: any) => p.type === 'credit')
-            .reduce((sum: number, p: any) => sum + (parseFloat(p.amount) || 0), 0);
-        }
+          // Create CustomerCredit transactions for payments
+          const parsedPaidToAdmin = parseFloat(paidToAdmin.toString()) || 0;
+          const parsedPaidToOldOrders = parseFloat(paidToOldOrders.toString()) || 0;
 
-        // Create customer credit record if applicable
-        if (creditAmount > 0 && customerId) {
-          const customerIdNum = parseInt(customerId);
-
-          // Calculate running balance
-          const existingCredits = await tx.customerCredit.findMany({
-            where: { customerId: customerIdNum },
-            select: { amount: true },
-          });
-
-          let runningBalance = 0;
-          for (const credit of existingCredits) {
-            runningBalance += decimalToNumber(credit.amount) ?? 0;
+          // Transaction 1: Payment to admin credit (if any)
+          if (parsedPaidToAdmin > 0) {
+            const balanceAfterAdmin = parsedPreviousBalance - parsedPaidToAdmin;
+            await tx.customerCredit.create({
+              data: {
+                customerId: customerIdNum,
+                orderId: order.id,
+                transactionType: 'credit_used',
+                amount: parsedPaidToAdmin,
+                balance: balanceAfterAdmin,
+                description: `Admin credit payment for Order #${orderNumber}`,
+                userId: parseInt(cashierId),
+              },
+            });
           }
-          runningBalance += creditAmount;
 
-          await tx.customerCredit.create({
-            data: {
-              customerId: customerIdNum,
-              orderId: order.id,
-              transactionType: 'sale',
-              amount: creditAmount,
-              balance: runningBalance,
-              description: `Credit purchase for Order #${orderNumber}`,
-              userId: parseInt(cashierId),
-            },
-          });
+          // Transaction 2: Payment to old orders (if any)
+          if (parsedPaidToOldOrders > 0) {
+            const balanceAfterOldOrders = parsedPreviousBalance - parsedPaidToAdmin - parsedPaidToOldOrders;
+            await tx.customerCredit.create({
+              data: {
+                customerId: customerIdNum,
+                orderId: order.id,
+                transactionType: 'credit_used',
+                amount: parsedPaidToOldOrders,
+                balance: balanceAfterOldOrders,
+                description: `Old order payment for Order #${orderNumber}`,
+                userId: parseInt(cashierId),
+              },
+            });
+          }
+
+          // Transaction 3: Unpaid current order (if any)
+          const unpaidCurrent = orderTotals.total - parsedAmountPaid;
+          if (unpaidCurrent > 0) {
+            await tx.customerCredit.create({
+              data: {
+                customerId: customerIdNum,
+                orderId: order.id,
+                transactionType: 'credit_added',
+                amount: unpaidCurrent,
+                balance: remainingBalance,
+                description: `Unpaid amount for Order #${orderNumber}`,
+                userId: parseInt(cashierId),
+              },
+            });
+          }
         }
 
         // Handle cheque payments - create cheque records
@@ -751,8 +858,23 @@ export class OrdersController {
         })),
       };
 
+      // Get updated customer balance if customer was specified
+      let customerBalance = null;
+      if (customerId) {
+        const customer = await prisma.customer.findUnique({
+          where: { id: parseInt(customerId) },
+          select: { creditBalance: true },
+        });
+        if (customer) {
+          customerBalance = {
+            remainingBalance: decimalToNumber(customer.creditBalance) ?? 0,
+          };
+        }
+      }
+
       return res.status(201).json({
         order: serializedOrder,
+        customerBalance, // Include customer's remaining balance
         message: 'Order created successfully',
       });
     } catch (error: any) {
@@ -766,7 +888,7 @@ export class OrdersController {
 
   static async getOrderProfitDetails(req: AuthRequest, res: Response) {
     try {
-      const { startDate, endDate, profitStatus = 'all', limit = 100 } = req.query;
+      const { startDate, endDate, profitStatus = 'all', limit } = req.query;
 
       // Parse dates
       const start = startDate ? new Date(startDate as string) : new Date(0);
@@ -795,7 +917,7 @@ export class OrdersController {
       });
 
       // Calculate limit
-      const limitNum = Math.min(parseInt(limit as string) || 100, 1000);
+      const limitNum = Math.min(parseLimit(limit, 'orders'), 1000);
 
       // Process orders to calculate profit/loss
       const orderProfitDetails = orders.map((order) => {
@@ -851,6 +973,73 @@ export class OrdersController {
         error: 'Internal server error',
         code: 'INTERNAL_ERROR',
         message: error.message,
+      });
+    }
+  }
+
+  static async getOrderStats(req: AuthRequest, res: Response) {
+    try {
+      const user = req.user;
+      if (!user) {
+        return res.status(401).json({ error: 'Unauthorized' });
+      }
+
+      // Build where clause based on user role
+      const whereClause: any = { status: 'completed' };
+
+      // If cashier, only show their stats
+      if (user.role === 'cashier') {
+        whereClause.cashierId = user.id;
+      }
+
+      // Get today's date range
+      const today = new Date();
+      today.setHours(0, 0, 0, 0);
+      const tomorrow = new Date(today);
+      tomorrow.setDate(tomorrow.getDate() + 1);
+
+      // Fetch aggregated data
+      const [totalOrdersData, totalRevenueData, todaysOrdersData] = await Promise.all([
+        // Total completed orders count
+        prisma.order.count({
+          where: whereClause
+        }),
+        // Total revenue from completed orders
+        prisma.order.aggregate({
+          where: whereClause,
+          _sum: {
+            total: true
+          }
+        }),
+        // Today's orders count
+        prisma.order.count({
+          where: {
+            ...whereClause,
+            createdAt: {
+              gte: today,
+              lt: tomorrow
+            }
+          }
+        })
+      ]);
+
+      const totalOrders = totalOrdersData || 0;
+      const totalRevenue = decimalToNumber(totalRevenueData._sum.total) || 0;
+      const avgOrderValue = totalOrders > 0 ? totalRevenue / totalOrders : 0;
+      const todaysOrders = todaysOrdersData || 0;
+
+      return res.json({
+        totalOrders,
+        totalRevenue: Number(totalRevenue.toFixed(2)),
+        avgOrderValue: Number(avgOrderValue.toFixed(2)),
+        todaysOrders
+      });
+    } catch (error: any) {
+      console.error('Get order stats error:', error);
+      return res.status(500).json({
+        error: 'Internal server error',
+        code: 'INTERNAL_ERROR',
+        message: error.message
       });
     }
   }

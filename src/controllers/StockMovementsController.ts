@@ -2,11 +2,12 @@ import { Response } from 'express';
 import { prisma } from '../models/db';
 import { AuthRequest } from '../middleware/auth';
 import { decimalToNumber } from '../utils/decimal';
+import { parseLimit } from '../config/pagination';
 
 export class StockMovementsController {
     static async getStockMovements(req: AuthRequest, res: Response) {
         try {
-            const { productId, movementType, limit = 100, offset = 0 } = req.query;
+            const { productId, movementType, limit, offset = 0 } = req.query;
 
             const where: any = {};
 
@@ -45,7 +46,7 @@ export class StockMovementsController {
                 orderBy: {
                     createdAt: 'desc',
                 },
-                take: Math.min(parseInt(limit as string) || 100, 1000),
+                take: Math.min(parseLimit(limit, 'orders'), 1000),
                 skip: parseInt(offset as string) || 0,
             });
 
