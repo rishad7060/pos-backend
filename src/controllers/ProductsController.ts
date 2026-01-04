@@ -258,42 +258,45 @@ export class ProductsController {
       }
 
       // Validate stock quantity and reorder level based on unit type
-      const stockQty = parseFloat(stockQuantity);
-      const reorderLvl = parseFloat(reorderLevel || 0);
+      // Only validate if unitType is provided in the update request
+      if (unitType !== undefined && stockQuantity !== undefined) {
+        const stockQty = parseFloat(stockQuantity);
+        const reorderLvl = parseFloat(reorderLevel || 0);
 
-      if (unitType === 'unit') {
-        // For units, must be whole numbers
-        if (!Number.isInteger(stockQty) || stockQty < 0) {
+        if (unitType === 'unit') {
+          // For units, must be whole numbers
+          if (!Number.isInteger(stockQty) || stockQty < 0) {
+            return res.status(400).json({
+              error: 'Stock quantity for units must be a non-negative whole number',
+              code: 'INVALID_UNIT_STOCK',
+            });
+          }
+          if (reorderLevel !== undefined && (!Number.isInteger(reorderLvl) || reorderLvl < 0)) {
+            return res.status(400).json({
+              error: 'Reorder level for units must be a non-negative whole number',
+              code: 'INVALID_UNIT_REORDER',
+            });
+          }
+        } else if (unitType === 'weight') {
+          // For weight, can be decimals
+          if (stockQty < 0) {
+            return res.status(400).json({
+              error: 'Stock quantity for weight must be non-negative',
+              code: 'INVALID_WEIGHT_STOCK',
+            });
+          }
+          if (reorderLevel !== undefined && reorderLvl < 0) {
+            return res.status(400).json({
+              error: 'Reorder level for weight must be non-negative',
+              code: 'INVALID_WEIGHT_REORDER',
+            });
+          }
+        } else {
           return res.status(400).json({
-            error: 'Stock quantity for units must be a non-negative whole number',
-            code: 'INVALID_UNIT_STOCK',
+            error: 'Invalid unit type. Must be "weight" or "unit"',
+            code: 'INVALID_UNIT_TYPE',
           });
         }
-        if (!Number.isInteger(reorderLvl) || reorderLvl < 0) {
-          return res.status(400).json({
-            error: 'Reorder level for units must be a non-negative whole number',
-            code: 'INVALID_UNIT_REORDER',
-          });
-        }
-      } else if (unitType === 'weight') {
-        // For weight, can be decimals
-        if (stockQty < 0) {
-          return res.status(400).json({
-            error: 'Stock quantity for weight must be non-negative',
-            code: 'INVALID_WEIGHT_STOCK',
-          });
-        }
-        if (reorderLvl < 0) {
-          return res.status(400).json({
-            error: 'Reorder level for weight must be non-negative',
-            code: 'INVALID_WEIGHT_REORDER',
-          });
-        }
-      } else {
-        return res.status(400).json({
-          error: 'Invalid unit type. Must be "weight" or "unit"',
-          code: 'INVALID_UNIT_TYPE',
-        });
       }
 
       const updateData: any = {};
