@@ -303,7 +303,6 @@ export class ProductsController {
       if (name !== undefined) updateData.name = name;
       if (description !== undefined) updateData.description = description || null;
       if (defaultPricePerKg !== undefined) updateData.defaultPricePerKg = defaultPricePerKg ? parseFloat(defaultPricePerKg) : null;
-      if (costPrice !== undefined) updateData.costPrice = costPrice ? parseFloat(costPrice) : null;
       if (category !== undefined) updateData.category = category || null;
       if (sku !== undefined) updateData.sku = sku || null;
       if (barcode !== undefined) updateData.barcode = barcode || null;
@@ -320,6 +319,50 @@ export class ProductsController {
       const existingProduct = await prisma.product.findUnique({
         where: { id: productId },
       });
+
+      if (!existingProduct) {
+        return res.status(404).json({
+          error: 'Product not found',
+          code: 'PRODUCT_NOT_FOUND',
+        });
+      }
+
+      // SPECIAL CASE: Allow cost price update ONLY if current cost price is NULL or 0
+      // This is a one-time fix for imported products without cost price
+      if (costPrice !== undefined) {
+        const currentCostPrice = existingProduct.costPrice ? existingProduct.costPrice.toNumber() : 0;
+        const newCostPrice = costPrice ? parseFloat(costPrice) : 0;
+
+        if (currentCostPrice <= 0 && newCostPrice > 0) {
+          // Allow update: product has no cost price, setting it for the first time
+          updateData.costPrice = newCostPrice;
+          console.log(`[COST PRICE FIX] Updating product ${productId} cost price from ${currentCostPrice} to ${newCostPrice}`);
+
+          // Also update all existing batches with cost price = 0 to the new cost price
+          const batchesUpdated = await prisma.stockBatch.updateMany({
+            where: {
+              productId: productId,
+              costPrice: 0, // Only update batches with 0 cost price
+            },
+            data: {
+              costPrice: newCostPrice,
+            },
+          });
+
+          console.log(`[COST PRICE FIX] Updated ${batchesUpdated.count} batch(es) for product ${productId}`);
+        } else if (currentCostPrice > 0) {
+          // Reject update: product already has a cost price (managed via batches)
+          return res.status(400).json({
+            error: 'Cost price cannot be updated directly',
+            code: 'COST_PRICE_LOCKED',
+            details: {
+              currentCostPrice,
+              message: 'This product already has a cost price. Cost price is automatically calculated from batch costs. To change it, receive new batches via purchase orders.',
+            },
+          });
+        }
+        // If newCostPrice is 0 or negative, skip updating (ignore)
+      }
 
       const product = await prisma.product.update({
         where: { id: productId },
