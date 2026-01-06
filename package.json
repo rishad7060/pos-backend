@@ -14,6 +14,7 @@
     "migrate:batches": "tsx src/scripts/create-initial-batches.ts",
     "migrate:supplier-credits": "tsx scripts/create-supplier-credits.ts",
     "sync:credits": "tsx src/scripts/sync-credit-balances.ts",
+    "sync:stock": "tsx scripts/sync-product-stock-from-batches.ts",
     "test:credits": "tsx src/scripts/test-credit-api.ts",
     "fix:sequences": "tsx scripts/fix-sequences.ts"
   },
