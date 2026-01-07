@@ -13,7 +13,8 @@ import { parseLimit } from '../config/pagination';
 import {
   deductFromBatchesFIFO,
   deductFromSpecificBatches,
-  createOrderItemBatches
+  createOrderItemBatches,
+  updateProductCostPrice
 } from '../services/batchService';
 
 export class OrdersController {
@@ -531,53 +532,47 @@ export class OrdersController {
 
           createdOrderItems.push(orderItem);
 
-          // Update stock if product exists and has weight-based quantity
-          if (calculatedItem.productId && calculatedItem.netWeightKg > 0) {
-            // For weight-based products, we need to update stock quantity
-            // Assuming stockQuantity is in kg, we'll deduct the netWeightKg
+          // CRITICAL FIX: Sync product stock from batches after deduction
+          // The batch service already deducted from batches above (deductFromBatchesFIFO)
+          // Now we need to update the product's stockQuantity to match the batch totals
+          // This replaces the old manual calculation which was causing sync issues
+          if (calculatedItem.productId) {
+            // Get product info for logging purposes
             const product = await tx.product.findUnique({
               where: { id: calculatedItem.productId },
               select: { stockQuantity: true, unitType: true },
             });
 
             if (product) {
+              // Calculate quantity deducted for stock movement logging
               let quantityToDeduct = 0;
               if (product.unitType === 'weight') {
-                // For weight-based, deduct exact net weight in kg
-                quantityToDeduct = calculatedItem.netWeightKg; // Use exact weight, not rounded up
+                // For weight-based, use exact net weight in kg
+                quantityToDeduct = calculatedItem.netWeightKg;
               } else {
-                // For unit-based, deduct by box count or quantity
+                // For unit-based, use box count or quantity
                 quantityToDeduct = calculatedItem.boxCount || 1;
               }
 
-              const currentStock = decimalToNumber(product.stockQuantity);
-              if (currentStock === null) {
-                throw new Error(`Product ${calculatedItem.productId} has null stock quantity`);
-              }
-              const rawDifference = currentStock - quantityToDeduct;
+              // OLD APPROACH (BUGGY): Manual calculation by subtraction
+              // This was overriding the correct batch-based sync!
+              // const newStockQuantity = currentStock - quantityToDeduct;
 
-              // Use very high precision to avoid floating point errors
-              let newStockQuantity = Number(rawDifference.toFixed(10));
+              // NEW APPROACH (CORRECT): Sync stock from batch totals
+              // This ensures product.stockQuantity always equals sum of batch quantities
+              await updateProductCostPrice(calculatedItem.productId, tx);
+              console.log(`✅ Stock synced from batches for product ${calculatedItem.productId}`);
 
-              // Only set to 0 if truly negative (not due to tiny precision errors)
-              if (newStockQuantity < -0.0001) { // Allow for tiny negative values due to precision
-                newStockQuantity = 0;
-              } else if (newStockQuantity < 0) {
-                // Tiny negative due to precision, clamp to 0
-                newStockQuantity = 0;
-              }
-
-              // Round to 3 decimal places for storage
-              newStockQuantity = Number(newStockQuantity.toFixed(3));
-
-              console.log(`Final stock after update: ${newStockQuantity}`);
-
-              await tx.product.update({
+              // Get updated stock quantity after sync for logging
+              const updatedProduct = await tx.product.findUnique({
                 where: { id: calculatedItem.productId },
-                data: { stockQuantity: newStockQuantity },
+                select: { stockQuantity: true },
               });
 
-              // Create stock movement record
+              const newStockQuantity = updatedProduct ? decimalToNumber(updatedProduct.stockQuantity) || 0 : 0;
+              console.log(`Final stock after batch sync: ${newStockQuantity.toFixed(3)}`);
+
+              // Create stock movement record for audit trail
               await tx.stockMovement.create({
                 data: {
                   productId: calculatedItem.productId,
